@@ -30,6 +30,19 @@ public class NarrativeBuilder {
     private static final Pattern SECTION_PATTERN = Pattern.compile("^(\\d+(?:\\.\\d+)*)\\.");
     private static final Pattern CONDITIONAL_PATTERN = Pattern.compile("\\[falls zutreffend:\\s*([^\\]]*?)\\]");
 
+    // FIXED: Pattern for removing conditional content with proper greedy matching
+    // This matches [falls zutreffend] followed by any content up to the next HTML tag or paragraph break
+    private static final Pattern CONDITIONAL_REMOVE_PATTERN = Pattern.compile(
+            "\\[falls zutreffend\\][^<]*?(?:<[^>]*>)*?",
+            Pattern.DOTALL
+    );
+
+    // More aggressive pattern for removing conditional content including text until the next paragraph
+    private static final Pattern CONDITIONAL_REMOVE_AGGRESSIVE = Pattern.compile(
+            "\\[falls zutreffend\\][^<]*(?:<[^>]*>)*[^<]*",
+            Pattern.DOTALL
+    );
+
     // Default fallback values
     private static final String DEFAULT_PATIENT_NAME = "Patient/Patientin";
     private static final String DEFAULT_INSTITUTION_NAME = "Ihre behandelnde Einrichtung";
@@ -63,7 +76,6 @@ public class NarrativeBuilder {
 
         // Log for debugging
         logger.debug("Final HTML length: {}", finalHtml.length());
-        logger.debug("Final HTML preview: {}", finalHtml.length() > 200 ? finalHtml.substring(0, 200) + "..." : finalHtml);
 
         // Check for remaining placeholders
         Matcher matcher = PLACEHOLDER_PATTERN.matcher(finalHtml);
@@ -184,6 +196,7 @@ public class NarrativeBuilder {
 
     /**
      * Replace placeholders with actual values
+     * FIXED: Conditional placeholder removal uses proper greedy matching
      */
     private String replacePlaceholders(String text, ConsentTemplate consentTemplate,
                                        ConsentRequest request, boolean isAccepted,
@@ -201,7 +214,7 @@ public class NarrativeBuilder {
         result = result.replaceAll("\\[der/dem Name der Einrichtung\\]", escapedInstitution);
         result = result.replaceAll("\\[Name der Einrichtung\\]", escapedInstitution);
 
-        // 2. Conditional placeholders
+        // 2. Conditional placeholders - FIXED
         result = replaceConditionalPlaceholders(result, isAccepted);
 
         // 3. Section numbering
@@ -255,14 +268,22 @@ public class NarrativeBuilder {
         return result;
     }
 
+    /**
+     * Replace conditional placeholders
+     * FIXED: Properly removes [falls zutreffend] and all following content for declined decisions
+     * FIXED: Keeps content for accepted decisions
+     */
     private String replaceConditionalPlaceholders(String text, boolean isAccepted) {
         if (text == null) return "";
 
         String result = text;
 
-        // Handle [falls zutreffend: content]
+        // Handle: [falls zutreffend: content]
+        // For ACCEPTED: replace with content
+        // For DECLINED: remove entirely
         Matcher matcher = CONDITIONAL_PATTERN.matcher(result);
         StringBuffer sb = new StringBuffer();
+
         while (matcher.find()) {
             String content = matcher.group(1).trim();
             String replacement = isAccepted ? content : "";
@@ -273,14 +294,37 @@ public class NarrativeBuilder {
 
         // Handle [falls zutreffend] without colon
         if (isAccepted) {
+            // For ACCEPTED: remove just the token, keep the content that follows
+            // Example: "[falls zutreffend] und in die Gewinnung" → "und in die Gewinnung"
             result = result.replaceAll("\\[falls zutreffend\\]\\s*", "");
         } else {
-            result = result.replaceAll("\\[falls zutreffend\\][^<]*?(?:<[^>]*>)*?", "");
+            // FIXED: For DECLINED: remove the token AND all content that follows until the next HTML element
+            // Example: "[falls zutreffend] und in die Gewinnung von Biomaterialien" → "" (removed entirely)
+
+            // First try: Remove [falls zutreffend] and everything until the next paragraph or HTML tag
+            // This uses a more aggressive pattern that matches the token and all following text
+            result = result.replaceAll("\\[falls zutreffend\\][^<]*?(?:<[^>]*>)*?[^<]*", "");
+
+            // Second pass: Clean up any leftover whitespace or punctuation
+            result = result.replaceAll("\\s*,\\s*", ", ");
+            result = result.replaceAll("\\s+\\.", ".");
+            result = result.replaceAll("\\s+", " ");
+
+            // If there are still remnants, try a different approach
+            // Look for the token and remove everything until the next period, semicolon, or HTML tag
+            Pattern aggressivePattern = Pattern.compile(
+                    "\\[falls zutreffend\\][^;.,!?<>]*[;.,!?]?",
+                    Pattern.DOTALL
+            );
+            result = aggressivePattern.matcher(result).replaceAll("");
         }
 
-        // Handle "Falls zutreffend:" without brackets
+        // Handle "Falls zutreffend:" without brackets (plain text)
         if (!isAccepted) {
-            result = result.replaceAll("Falls zutreffend:[^<]*?(?:<[^>]*>)*?", "");
+            // Remove "Falls zutreffend:" and everything until the next period or HTML tag
+            result = result.replaceAll("Falls zutreffend:[^<]*?(?:<[^>]*>)*?[^<]*", "");
+            // Also handle variations
+            result = result.replaceAll("Falls zutreffend[^<]*?(?:<[^>]*>)*?[^<]*", "");
         }
 
         return result;
@@ -327,19 +371,16 @@ public class NarrativeBuilder {
         }
 
         try {
-            // Try to use JSoup for cleaning
             Document doc = Jsoup.parse(html, "", Parser.xmlParser());
             doc.outputSettings().syntax(Document.OutputSettings.Syntax.xml);
 
             String result = doc.body().html();
 
-            // If JSoup returns empty, use the original
             if (result == null || result.isEmpty()) {
                 logger.warn("JSoup returned empty, using original HTML");
                 return html;
             }
 
-            // Ensure namespace
             if (!result.startsWith("<div xmlns=\"http://www.w3.org/1999/xhtml\"")) {
                 result = "<div xmlns=\"http://www.w3.org/1999/xhtml\">" + result + "</div>";
             }
@@ -348,7 +389,6 @@ public class NarrativeBuilder {
         } catch (Exception e) {
             logger.warn("JSoup cleaning failed, using original HTML with basic fixes", e);
 
-            // Basic fixes
             String cleaned = html;
             cleaned = cleaned.replaceAll("<br>", "<br/>");
             cleaned = cleaned.replaceAll("<br\\s+/>", "<br/>");
