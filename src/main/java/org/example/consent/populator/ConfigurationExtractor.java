@@ -5,8 +5,7 @@ import org.hl7.fhir.r4.model.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.HashMap;
-import java.util.Map;
+import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -16,12 +15,18 @@ import java.util.regex.Pattern;
  *
  * FIXED: Properly trims all key-value tokens from externProperties
  * FIXED: Supports both template-level and domain-level fhirForceProfileConsent
+ * FIXED: Full ISO 8601 duration validation support
  */
 public class ConfigurationExtractor {
 
     private static final Logger logger = LoggerFactory.getLogger(ConfigurationExtractor.class);
 
-    private static final Pattern VALIDITY_PERIOD_PATTERN = Pattern.compile("P(\\d+)([YMD])");
+    // FIXED: Full ISO 8601 duration validation pattern
+    private static final Pattern ISO_8601_DURATION_VALIDATION = Pattern.compile(
+            "P(?:(\\d+(?:\\.\\d+)?)Y)?(?:(\\d+(?:\\.\\d+)?)M)?(?:(\\d+(?:\\.\\d+)?)D)?(?:(\\d+(?:\\.\\d+)?)W)?",
+            Pattern.CASE_INSENSITIVE
+    );
+
     private static final Pattern CATEGORY_PATH_PATTERN = Pattern.compile("^Consent\\.category(?:\\:[a-zA-Z]+)?$");
 
     // Default policy rule (FHIR standard)
@@ -41,7 +46,6 @@ public class ConfigurationExtractor {
 
     /**
      * Parse externProperties string into a map of key-value pairs
-     * FIXED: Properly trims each token and handles empty strings
      */
     private Map<String, String> parseExternProperties(String externProperties) {
         Map<String, String> properties = new HashMap<>();
@@ -50,7 +54,6 @@ public class ConfigurationExtractor {
             return properties;
         }
 
-        // Split by semicolon and trim each token
         String[] tokens = externProperties.split(";");
         for (String token : tokens) {
             if (token == null || token.trim().isEmpty()) {
@@ -59,7 +62,6 @@ public class ConfigurationExtractor {
 
             String trimmedToken = token.trim();
 
-            // Handle key=value format
             int equalsIndex = trimmedToken.indexOf('=');
             if (equalsIndex > 0) {
                 String key = trimmedToken.substring(0, equalsIndex).trim();
@@ -69,7 +71,6 @@ public class ConfigurationExtractor {
                     logger.debug("Parsed property: {} = {}", key, value);
                 }
             } else {
-                // Handle key-only format (e.g., "singleUseOnly")
                 properties.put(trimmedToken, "true");
                 logger.debug("Parsed flag property: {}", trimmedToken);
             }
@@ -95,7 +96,6 @@ public class ConfigurationExtractor {
 
     /**
      * Extract all configuration from template and profile
-     * FIXED: Uses proper property parsing
      */
     public TemplateConfiguration extractConfiguration(ConsentTemplate consentTemplate, StructureDefinition miiProfile) {
         LoincCategory loinc = extractLoincCategory(miiProfile);
@@ -103,7 +103,6 @@ public class ConfigurationExtractor {
         String validityPeriod = extractValidityPeriod(consentTemplate);
         Scope scope = extractScope(consentTemplate);
 
-        // FIXED: Extract profile URL using parsed properties
         String profileUrl = extractProfileUrl(consentTemplate);
         if (profileUrl == null || profileUrl.isEmpty()) {
             throw new IllegalStateException(
@@ -138,10 +137,8 @@ public class ConfigurationExtractor {
 
     /**
      * Extract profile URL from template or domain externProperties
-     * FIXED: Uses parsed properties
      */
     private String extractProfileUrl(ConsentTemplate consentTemplate) {
-        // First try template externProperties
         if (consentTemplate.getExternProperties() != null) {
             Map<String, String> props = parseExternProperties(consentTemplate.getExternProperties());
             String profileUrl = props.get("fhirForceProfileConsent");
@@ -150,7 +147,6 @@ public class ConfigurationExtractor {
             }
         }
 
-        // Fallback: Try to get from domain externProperties (for older templates like 1.6.d)
         if (consentTemplate.getDomainName() != null && consentTemplate.getDomainName().equals("MII")) {
             String domainExternProperties = consentTemplate.getDomainExternProperties();
             if (domainExternProperties != null && !domainExternProperties.isEmpty()) {
@@ -167,7 +163,6 @@ public class ConfigurationExtractor {
 
     /**
      * Extract consent category from template externProperties
-     * FIXED: Uses parsed properties
      */
     private String extractConsentCategory(ConsentTemplate consentTemplate) {
         if (consentTemplate.getExternProperties() != null) {
@@ -179,7 +174,6 @@ public class ConfigurationExtractor {
 
     /**
      * Extract policy value set from template externProperties
-     * FIXED: Uses parsed properties
      */
     private String extractPolicyValueSet(ConsentTemplate consentTemplate) {
         if (consentTemplate.getExternProperties() != null) {
@@ -198,7 +192,6 @@ public class ConfigurationExtractor {
             throw new IllegalArgumentException("MII profile cannot be null");
         }
 
-        // Check snapshot first
         if (miiProfile.getSnapshot() != null && miiProfile.getSnapshot().getElement() != null) {
             for (ElementDefinition element : miiProfile.getSnapshot().getElement()) {
                 String path = element.getPath();
@@ -212,7 +205,6 @@ public class ConfigurationExtractor {
             }
         }
 
-        // Fallback to differential
         if (miiProfile.getDifferential() != null && miiProfile.getDifferential().getElement() != null) {
             for (ElementDefinition element : miiProfile.getDifferential().getElement()) {
                 String path = element.getPath();
@@ -276,34 +268,68 @@ public class ConfigurationExtractor {
         return new PolicyRule(system, code, display);
     }
 
+    /**
+     * Extract validity period from template expirationProperties
+     * FIXED: Supports full ISO 8601 duration format
+     */
     private String extractValidityPeriod(ConsentTemplate consentTemplate) {
         if (consentTemplate.getExpirationProperties() == null || consentTemplate.getExpirationProperties().isEmpty()) {
             throw new IllegalStateException(
-                    "Template missing expirationProperties. Required: VALIDITY_PERIOD=... (e.g., VALIDITY_PERIOD=P30Y)"
+                    "Template missing expirationProperties. Required: VALIDITY_PERIOD=... (e.g., VALIDITY_PERIOD=P30Y, VALIDITY_PERIOD=P1Y6M)"
             );
         }
 
-        // FIXED: Properly parse expiration properties with trimming
         String[] props = consentTemplate.getExpirationProperties().split(";");
         for (String prop : props) {
             if (prop == null) continue;
             String trimmedProp = prop.trim();
             if (trimmedProp.startsWith("VALIDITY_PERIOD=")) {
                 String period = trimmedProp.substring("VALIDITY_PERIOD=".length()).trim();
-                Matcher matcher = VALIDITY_PERIOD_PATTERN.matcher(period);
-                if (!matcher.matches()) {
+
+                // FIXED: Validate using full ISO 8601 pattern
+                if (!isValidIso8601Duration(period)) {
                     throw new IllegalStateException(
-                            "Invalid VALIDITY_PERIOD format: " + period
+                            "Invalid VALIDITY_PERIOD format: " + period +
+                                    ". Expected ISO 8601 duration format like: P30Y, P1Y6M, P2Y3M15D, P5Y, P6M, P1W"
                     );
                 }
+
                 logger.info("Extracted validity period: {}", period);
                 return period;
             }
         }
 
         throw new IllegalStateException(
-                "Template expirationProperties missing VALIDITY_PERIOD."
+                "Template expirationProperties missing VALIDITY_PERIOD. " +
+                        "Example: expirationProperties: \"VALIDITY_PERIOD=P30Y;\""
         );
+    }
+
+    /**
+     * Validate ISO 8601 duration format
+     * FIXED: Supports full ISO 8601 duration format
+     */
+    private boolean isValidIso8601Duration(String period) {
+        if (period == null || period.isEmpty()) {
+            return false;
+        }
+
+        String normalized = period.toUpperCase();
+        if (!normalized.startsWith("P")) {
+            return false;
+        }
+
+        // Check against full ISO 8601 pattern
+        Matcher matcher = ISO_8601_DURATION_VALIDATION.matcher(normalized);
+        if (matcher.matches()) {
+            // Ensure at least one unit is present
+            return matcher.group(1) != null ||
+                    matcher.group(2) != null ||
+                    matcher.group(3) != null ||
+                    matcher.group(4) != null;
+        }
+
+        return false;
     }
 
     private Scope extractScope(ConsentTemplate consentTemplate) {
