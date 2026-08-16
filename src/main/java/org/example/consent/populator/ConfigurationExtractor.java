@@ -1,5 +1,6 @@
 package org.example.consent.populator;
 
+import org.example.consent.config.FhirConsentConfig;
 import org.example.consent.model.*;
 import org.hl7.fhir.r4.model.*;
 import org.slf4j.Logger;
@@ -16,6 +17,7 @@ import java.util.regex.Pattern;
  * FIXED: Properly trims all key-value tokens from externProperties
  * FIXED: Supports both template-level and domain-level fhirForceProfileConsent
  * FIXED: Full ISO 8601 duration validation support
+ * FIXED: Uses externalized configuration for default values
  */
 public class ConfigurationExtractor {
 
@@ -29,6 +31,9 @@ public class ConfigurationExtractor {
 
     private static final Pattern CATEGORY_PATH_PATTERN = Pattern.compile("^Consent\\.category(?:\\:[a-zA-Z]+)?$");
 
+    // Configuration
+    private final FhirConsentConfig config;
+
     // Default policy rule (FHIR standard)
     private static final String DEFAULT_POLICY_RULE_SYSTEM = "http://terminology.hl7.org/CodeSystem/v3-ActCode";
     private static final String DEFAULT_POLICY_RULE_CODE = "OPTIN";
@@ -39,10 +44,26 @@ public class ConfigurationExtractor {
     private static final String DEFAULT_SCOPE_CODE = "research";
     private static final String DEFAULT_SCOPE_DISPLAY = "Research";
 
-    // Fallback LOINC values
-    private static final String FALLBACK_LOINC_CODE = "57016-8";
-    private static final String FALLBACK_LOINC_SYSTEM = "http://loinc.org";
-    private static final String FALLBACK_LOINC_DISPLAY = "Privacy consent";
+    // Fallback LOINC values (from config or hardcoded)
+    private String fallbackLoincCode;
+    private String fallbackLoincSystem;
+    private String fallbackLoincDisplay;
+
+    public ConfigurationExtractor() {
+        this.config = new FhirConsentConfig();
+        initializeFallbacks();
+    }
+
+    public ConfigurationExtractor(FhirConsentConfig config) {
+        this.config = config != null ? config : new FhirConsentConfig();
+        initializeFallbacks();
+    }
+
+    private void initializeFallbacks() {
+        this.fallbackLoincCode = config.getLoincCode();
+        this.fallbackLoincSystem = config.getLoincSystem();
+        this.fallbackLoincDisplay = config.getLoincDisplay();
+    }
 
     /**
      * Parse externProperties string into a map of key-value pairs
@@ -184,45 +205,126 @@ public class ConfigurationExtractor {
     }
 
     // ==========================================
-    // Other extraction methods
+    // LOINC Category Extraction Methods
     // ==========================================
 
+    private static class LoincCategory {
+        final String code, system, display;
+        LoincCategory(String code, String system, String display) {
+            this.code = code; this.system = system; this.display = display;
+        }
+    }
+
+    /**
+     * Extract LOINC category from MII profile using multiple strategies
+     */
     private LoincCategory extractLoincCategory(StructureDefinition miiProfile) {
         if (miiProfile == null) {
             throw new IllegalArgumentException("MII profile cannot be null");
         }
 
+        // Strategy 1: Check for Consent.category:loinc slice specifically
+        LoincCategory result = extractFromSlice(miiProfile, "loinc");
+        if (result != null) return result;
+
+        // Strategy 2: Check for Consent.category:mii slice
+        result = extractFromSlice(miiProfile, "mii");
+        if (result != null) return result;
+
+        // Strategy 3: Find any Consent.category with pattern or fixed value
+        result = extractFromAnyCategory(miiProfile);
+        if (result != null) return result;
+
+        // Strategy 4: Check ValueSet bindings
+        result = extractFromValueSetBinding(miiProfile);
+        if (result != null) return result;
+
+        // Strategy 5: Fallback to config values
+        logger.warn("Could not extract LOINC category from profile, using fallback values");
+        return new LoincCategory(fallbackLoincCode, fallbackLoincSystem, fallbackLoincDisplay);
+    }
+
+    /**
+     * Extract category from a specific slice
+     */
+    private LoincCategory extractFromSlice(StructureDefinition miiProfile, String sliceName) {
+        String targetPath = "Consent.category:" + sliceName;
+
+        // Check snapshot
+        if (miiProfile.getSnapshot() != null && miiProfile.getSnapshot().getElement() != null) {
+            for (ElementDefinition element : miiProfile.getSnapshot().getElement()) {
+                String path = element.getPath();
+                if (path != null && path.equals(targetPath)) {
+                    LoincCategory result = extractFromElement(element);
+                    if (result != null) {
+                        logger.info("Extracted LOINC category from slice: {} ({}) [path: {}]",
+                                result.code, result.system, path);
+                        return result;
+                    }
+                }
+            }
+        }
+
+        // Check differential
+        if (miiProfile.getDifferential() != null && miiProfile.getDifferential().getElement() != null) {
+            for (ElementDefinition element : miiProfile.getDifferential().getElement()) {
+                String path = element.getPath();
+                if (path != null && path.equals(targetPath)) {
+                    LoincCategory result = extractFromElement(element);
+                    if (result != null) {
+                        logger.info("Extracted LOINC category from differential slice: {} ({}) [path: {}]",
+                                result.code, result.system, path);
+                        return result;
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Extract category from any Consent.category element
+     */
+    private LoincCategory extractFromAnyCategory(StructureDefinition miiProfile) {
+        // Check snapshot
         if (miiProfile.getSnapshot() != null && miiProfile.getSnapshot().getElement() != null) {
             for (ElementDefinition element : miiProfile.getSnapshot().getElement()) {
                 String path = element.getPath();
                 if (path != null && isCategoryPath(path)) {
                     LoincCategory result = extractFromElement(element);
                     if (result != null) {
-                        logger.info("Extracted LOINC category from profile: {} ({})", result.code, result.system);
+                        logger.info("Extracted LOINC category from profile element: {} ({}) [path: {}]",
+                                result.code, result.system, path);
                         return result;
                     }
                 }
             }
         }
 
+        // Check differential
         if (miiProfile.getDifferential() != null && miiProfile.getDifferential().getElement() != null) {
             for (ElementDefinition element : miiProfile.getDifferential().getElement()) {
                 String path = element.getPath();
                 if (path != null && isCategoryPath(path)) {
                     LoincCategory result = extractFromElement(element);
                     if (result != null) {
-                        logger.info("Extracted LOINC category from differential: {} ({})", result.code, result.system);
+                        logger.info("Extracted LOINC category from differential element: {} ({}) [path: {}]",
+                                result.code, result.system, path);
                         return result;
                     }
                 }
             }
         }
 
-        logger.warn("Could not extract LOINC category from profile, using fallback");
-        return new LoincCategory(FALLBACK_LOINC_CODE, FALLBACK_LOINC_SYSTEM, FALLBACK_LOINC_DISPLAY);
+        return null;
     }
 
+    /**
+     * Extract category from an ElementDefinition
+     */
     private LoincCategory extractFromElement(ElementDefinition element) {
+        // Check pattern
         if (element.getPattern() != null && element.getPattern() instanceof CodeableConcept) {
             CodeableConcept pattern = (CodeableConcept) element.getPattern();
             if (pattern.getCoding() != null && !pattern.getCoding().isEmpty()) {
@@ -234,6 +336,7 @@ public class ConfigurationExtractor {
             }
         }
 
+        // Check fixed value
         if (element.getFixed() != null && element.getFixed() instanceof CodeableConcept) {
             CodeableConcept fixed = (CodeableConcept) element.getFixed();
             if (fixed.getCoding() != null && !fixed.getCoding().isEmpty()) {
@@ -245,11 +348,55 @@ public class ConfigurationExtractor {
             }
         }
 
+        // Check example
+        if (element.getExample() != null && element.getExample() instanceof CodeableConcept) {
+            CodeableConcept example = (CodeableConcept) element.getExample();
+            if (example.getCoding() != null && !example.getCoding().isEmpty()) {
+                Coding coding = example.getCoding().get(0);
+                if (coding.getSystem() != null && coding.getCode() != null) {
+                    String display = coding.getDisplay() != null ? coding.getDisplay() : "Privacy consent";
+                    return new LoincCategory(coding.getCode(), coding.getSystem(), display);
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Extract category from ValueSet binding
+     */
+    private LoincCategory extractFromValueSetBinding(StructureDefinition miiProfile) {
+        if (miiProfile.getSnapshot() != null && miiProfile.getSnapshot().getElement() != null) {
+            for (ElementDefinition element : miiProfile.getSnapshot().getElement()) {
+                String path = element.getPath();
+                if (path != null && isCategoryPath(path)) {
+                    if (element.getBinding() != null) {
+                        String valueSet = element.getBinding().getValueSet();
+                        if (valueSet != null && valueSet.contains("loinc")) {
+                            logger.info("Found category ValueSet binding: {}, using fallback LOINC", valueSet);
+                            return new LoincCategory(fallbackLoincCode, fallbackLoincSystem, fallbackLoincDisplay);
+                        }
+                    }
+                }
+            }
+        }
         return null;
     }
 
     private boolean isCategoryPath(String path) {
         return path != null && CATEGORY_PATH_PATTERN.matcher(path).matches();
+    }
+
+    // ==========================================
+    // Policy Rule Extraction
+    // ==========================================
+
+    private static class PolicyRule {
+        final String system, code, display;
+        PolicyRule(String system, String code, String display) {
+            this.system = system; this.code = code; this.display = display;
+        }
     }
 
     private PolicyRule extractPolicyRule(ConsentTemplate consentTemplate) {
@@ -267,6 +414,10 @@ public class ConfigurationExtractor {
         logger.info("Using policy rule: {} ({})", code, system);
         return new PolicyRule(system, code, display);
     }
+
+    // ==========================================
+    // Validity Period Extraction
+    // ==========================================
 
     /**
      * Extract validity period from template expirationProperties
@@ -332,6 +483,17 @@ public class ConfigurationExtractor {
         return false;
     }
 
+    // ==========================================
+    // Scope Extraction
+    // ==========================================
+
+    private static class Scope {
+        final String system, code, display;
+        Scope(String system, String code, String display) {
+            this.system = system; this.code = code; this.display = display;
+        }
+    }
+
     private Scope extractScope(ConsentTemplate consentTemplate) {
         String system = DEFAULT_SCOPE_SYSTEM;
         String code = DEFAULT_SCOPE_CODE;
@@ -357,27 +519,10 @@ public class ConfigurationExtractor {
     }
 
     // ==========================================
-    // Inner DTO classes
+    // Public getter for config
     // ==========================================
 
-    public static class LoincCategory {
-        public final String code, system, display;
-        public LoincCategory(String code, String system, String display) {
-            this.code = code; this.system = system; this.display = display;
-        }
-    }
-
-    public static class PolicyRule {
-        public final String system, code, display;
-        public PolicyRule(String system, String code, String display) {
-            this.system = system; this.code = code; this.display = display;
-        }
-    }
-
-    public static class Scope {
-        public final String system, code, display;
-        public Scope(String system, String code, String display) {
-            this.system = system; this.code = code; this.display = display;
-        }
+    public FhirConsentConfig getConfig() {
+        return config;
     }
 }

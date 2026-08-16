@@ -1,5 +1,6 @@
 package org.example.consent.populator;
 
+import org.example.consent.config.FhirConsentConfig;
 import org.example.consent.model.*;
 import org.hl7.fhir.r4.model.*;
 import org.slf4j.Logger;
@@ -13,17 +14,18 @@ import java.util.regex.Pattern;
  * Orchestrates the work of specialized builders and extractors
  * STATELESS DESIGN: Thread-safe, can be reused safely across multiple requests
  *
- * FIXED: Untrimmed externProperties tokens - now using Pattern.split with trim
- * FIXED: Loose status matching - using equalsIgnoreCase
- * FIXED: Null safety for status checks
- * FIXED: Incomplete scope initialization with null checks
+ * FIXED: Externalized configuration via FhirConsentConfig
+ * FIXED: Composite map keys with validation
+ * FIXED: Full profile validation integration
  */
 public class ConsentPopulator {
 
     private static final Logger logger = LoggerFactory.getLogger(ConsentPopulator.class);
 
-    // FIXED: Pattern for splitting externProperties with optional whitespace
     private static final Pattern EXTERN_PROPERTIES_SPLIT = Pattern.compile(";\\s*");
+
+    // Configuration
+    private final FhirConsentConfig config;
 
     // Only immutable, shared dependencies
     private final ExchangeFormatDefinition template;
@@ -44,7 +46,18 @@ public class ConsentPopulator {
      * @param template The consent template (ExchangeFormatDefinition)
      */
     public ConsentPopulator(ExchangeFormatDefinition template) {
+        this(template, new FhirConsentConfig());
+    }
+
+    /**
+     * Constructor with custom configuration
+     *
+     * @param template The consent template (ExchangeFormatDefinition)
+     * @param config Externalized configuration
+     */
+    public ConsentPopulator(ExchangeFormatDefinition template, FhirConsentConfig config) {
         this.template = template;
+        this.config = config != null ? config : new FhirConsentConfig();
         this.policyMap = new HashMap<>();
         this.moduleMap = new HashMap<>();
         this.templateMap = new HashMap<>();
@@ -69,31 +82,19 @@ public class ConsentPopulator {
 
     /**
      * Populate a Consent resource from the template and user decisions
-     *
-     * @param request The user's consent request with decisions
-     * @param miiProfile The MII Consent profile (StructureDefinition)
-     * @return Populated Consent resource
-     * @throws IllegalArgumentException if request is null or missing required fields
      */
     public Consent populateConsent(ConsentRequest request, StructureDefinition miiProfile) {
-        // Validate request BEFORE accessing templateMap
         validateRequest(request);
 
         logger.info("Populating consent for patient: {}, template: {}",
                 request.getPatientId(), request.getTemplateKey());
 
-        ConsentTemplate consentTemplate = templateMap.get(request.getTemplateKey());
-        if (consentTemplate == null) {
-            throw new IllegalArgumentException(
-                    "Template not found: " + request.getTemplateKey() +
-                            ". Available templates: " + templateMap.keySet()
-            );
-        }
+        // FIXED: Validate template key with proper error message
+        ConsentTemplate consentTemplate = getTemplateSafely(request.getTemplateKey());
 
         // Extract configuration from template and profile
         TemplateConfiguration config = configExtractor.extractConfiguration(consentTemplate, miiProfile);
 
-        // Get consent date from request (or default to now)
         Date consentDate = request.getConsentDate() != null ?
                 request.getConsentDate() : new Date();
         logger.info("Using consent date: {}", consentDate);
@@ -111,11 +112,11 @@ public class ConsentPopulator {
         // 3. Status
         consent.setStatus(Consent.ConsentState.ACTIVE);
 
-        // 4. Scope - FIXED: Null checks applied
+        // 4. Scope
         CodeableConcept scope = buildScope(config);
         consent.setScope(scope);
 
-        // 5. Categories
+        // 5. Categories - FIXED: Uses externalized configuration
         List<CodeableConcept> categories = buildCategories(consentTemplate, config);
         for (CodeableConcept category : categories) {
             consent.addCategory(category);
@@ -150,7 +151,7 @@ public class ConsentPopulator {
         // 11. Policy Rule
         consent.setPolicyRule(buildPolicyRule(config));
 
-        // 12. Provisions - Pass consent date so period.start matches consent.dateTime
+        // 12. Provisions
         Consent.ProvisionComponent mainProvision = provisionBuilder.buildProvisions(
                 consentTemplate, request, config, consentDate);
         consent.setProvision(mainProvision);
@@ -160,7 +161,7 @@ public class ConsentPopulator {
             logger.info("Signature received for later processing");
         }
 
-        // FIXED: Null-safe status counting with equalsIgnoreCase
+        // Count decisions with null safety
         long acceptedCount = request.getModuleDecisions() != null ?
                 request.getModuleDecisions().stream()
                         .filter(d -> d != null && d.getStatus() != null &&
@@ -181,18 +182,52 @@ public class ConsentPopulator {
         return consent;
     }
 
+    /**
+     * Safely get template with validation
+     * FIXED: Composite map key with proper validation
+     */
+    private ConsentTemplate getTemplateSafely(String templateKey) {
+        if (templateKey == null || templateKey.isEmpty()) {
+            throw new IllegalArgumentException("Template key cannot be null or empty");
+        }
+
+        // Validate key format
+        String[] parts = templateKey.split(";");
+        if (parts.length != 3) {
+            throw new IllegalArgumentException(
+                    "Invalid template key format. Expected: domain;name;version. Got: " + templateKey
+            );
+        }
+
+        // Validate each part is not empty
+        for (int i = 0; i < parts.length; i++) {
+            if (parts[i] == null || parts[i].trim().isEmpty()) {
+                throw new IllegalArgumentException(
+                        "Template key part " + i + " is empty. Key: " + templateKey
+                );
+            }
+        }
+
+        ConsentTemplate consentTemplate = templateMap.get(templateKey);
+        if (consentTemplate == null) {
+            throw new IllegalArgumentException(
+                    "Template not found: " + templateKey +
+                            ". Available templates: " + templateMap.keySet()
+            );
+        }
+        return consentTemplate;
+    }
+
     // ==========================================
-    // Helper methods
+    // Helper methods with externalized config
     // ==========================================
 
     /**
      * Build scope CodeableConcept with null safety
-     * FIXED: Null checks on config scope values
      */
     private CodeableConcept buildScope(TemplateConfiguration config) {
         CodeableConcept scope = new CodeableConcept();
 
-        // FIXED: Null checks to avoid empty FHIR codings
         String system = config.scopeSystem != null ? config.scopeSystem : "http://terminology.hl7.org/CodeSystem/consentscope";
         String code = config.scopeCode != null ? config.scopeCode : "research";
         String display = config.scopeDisplay != null ? config.scopeDisplay : "Research";
@@ -207,26 +242,29 @@ public class ConsentPopulator {
 
     /**
      * Build categories from template and config
-     * FIXED: Uses EXTERN_PROPERTIES_SPLIT for proper trimming
+     * FIXED: Uses externalized configuration for default values
      */
     private List<CodeableConcept> buildCategories(ConsentTemplate consentTemplate, TemplateConfiguration config) {
         List<CodeableConcept> categories = new ArrayList<>();
 
-        // LOINC category
+        // 1. LOINC category - uses config values
         CodeableConcept loincCategory = new CodeableConcept();
         loincCategory.addCoding()
-                .setSystem(config.loincCategorySystem)
-                .setCode(config.loincCategoryCode)
-                .setDisplay(config.loincCategoryDisplay);
+                .setSystem(config.loincCategorySystem != null ?
+                        config.loincCategorySystem : this.config.getLoincSystem())
+                .setCode(config.loincCategoryCode != null ?
+                        config.loincCategoryCode : this.config.getLoincCode())
+                .setDisplay(config.loincCategoryDisplay != null ?
+                        config.loincCategoryDisplay : this.config.getLoincDisplay());
         categories.add(loincCategory);
         logger.debug("Added LOINC category: {} ({})", config.loincCategoryCode, config.loincCategorySystem);
 
-        // MII category
+        // 2. MII category - uses config values
         CodeableConcept miiCategory = new CodeableConcept();
-        String miiCategorySystem = "https://www.medizininformatik-initiative.de/fhir/modul-consent/CodeSystem/mii-cs-consent-version-modules";
-        String miiCategoryDisplay = "MII Broad Consent";
+        String miiCategorySystem = this.config.getMiiVersionModuleSystem();
+        String miiCategoryDisplay = this.config.getMiiCategoryDisplay();
 
-        // FIXED: Use EXTERN_PROPERTIES_SPLIT for proper trimming
+        // Allow template to override
         if (consentTemplate.getExternProperties() != null) {
             String[] props = EXTERN_PROPERTIES_SPLIT.split(consentTemplate.getExternProperties());
             for (String prop : props) {
@@ -246,7 +284,7 @@ public class ConsentPopulator {
                 .setCode(config.consentCategory)
                 .setDisplay(miiCategoryDisplay);
         categories.add(miiCategory);
-        logger.info("Added MII category: {}", config.consentCategory);
+        logger.info("Added MII category: {} ({})", config.consentCategory, miiCategorySystem);
 
         return categories;
     }
@@ -273,14 +311,12 @@ public class ConsentPopulator {
 
     /**
      * Extract source reference from template or request
-     * FIXED: Uses EXTERN_PROPERTIES_SPLIT for proper trimming
      */
     private String extractSourceReference(ConsentTemplate consentTemplate, ConsentRequest request) {
         if (request.getSourceReference() != null && !request.getSourceReference().isEmpty()) {
             return request.getSourceReference();
         }
 
-        // FIXED: Use EXTERN_PROPERTIES_SPLIT for proper trimming
         if (consentTemplate.getExternProperties() != null) {
             String[] props = EXTERN_PROPERTIES_SPLIT.split(consentTemplate.getExternProperties());
             for (String prop : props) {
@@ -299,16 +335,10 @@ public class ConsentPopulator {
     // Public Methods
     // ==========================================
 
-    /**
-     * Get all available template keys (immutable view)
-     */
     public Set<String> getAvailableTemplateKeys() {
         return Collections.unmodifiableSet(templateMap.keySet());
     }
 
-    /**
-     * Get all available template names
-     */
     public List<String> getAvailableTemplateNames() {
         return templateMap.values().stream()
                 .map(t -> t.getDomainName() + " - " + t.getName() + " (" + t.getVersionLabel() + ")")
@@ -317,19 +347,10 @@ public class ConsentPopulator {
 
     /**
      * Get all modules from a template with their default status
+     * FIXED: Uses safe template retrieval
      */
     public List<ModuleInfo> getModulesForTemplate(String templateKey) {
-        if (templateKey == null || templateKey.isEmpty()) {
-            throw new IllegalArgumentException("Template key cannot be null or empty");
-        }
-
-        ConsentTemplate consentTemplate = templateMap.get(templateKey);
-        if (consentTemplate == null) {
-            throw new IllegalArgumentException(
-                    "Template not found: " + templateKey +
-                            ". Available templates: " + templateMap.keySet()
-            );
-        }
+        ConsentTemplate consentTemplate = getTemplateSafely(templateKey);
 
         List<ModuleInfo> moduleInfos = new ArrayList<>();
         if (consentTemplate.getModulesAssignedConsentModule() != null) {
@@ -353,6 +374,13 @@ public class ConsentPopulator {
         return moduleInfos;
     }
 
+    /**
+     * Get the configuration
+     */
+    public FhirConsentConfig getConfig() {
+        return config;
+    }
+
     // ==========================================
     // Private helpers
     // ==========================================
@@ -369,10 +397,19 @@ public class ConsentPopulator {
         }
     }
 
+    /**
+     * Build maps with composite keys
+     * FIXED: Validates key components before concatenation
+     */
     private void buildMaps() {
         if (template.getPoliciesConsentPolicy() != null) {
             for (ConsentPolicy policy : template.getPoliciesConsentPolicy()) {
-                String key = policy.getDomainName() + ";" + policy.getName() + ";" + policy.getVersion();
+                String key = buildCompositeKey(
+                        policy.getDomainName(),
+                        policy.getName(),
+                        policy.getVersion(),
+                        "policy"
+                );
                 policyMap.put(key, policy);
                 logger.debug("Mapped policy: {}", key);
             }
@@ -380,7 +417,12 @@ public class ConsentPopulator {
 
         if (template.getModulesConsentModule() != null) {
             for (ConsentModule module : template.getModulesConsentModule()) {
-                String key = module.getDomainName() + ";" + module.getName() + ";" + module.getVersion();
+                String key = buildCompositeKey(
+                        module.getDomainName(),
+                        module.getName(),
+                        module.getVersion(),
+                        "module"
+                );
                 moduleMap.put(key, module);
                 logger.debug("Mapped module: {}", key);
             }
@@ -388,7 +430,12 @@ public class ConsentPopulator {
 
         if (template.getTemplatesConsentTemplate() != null) {
             for (ConsentTemplate consentTemplate : template.getTemplatesConsentTemplate()) {
-                String key = consentTemplate.getDomainName() + ";" + consentTemplate.getName() + ";" + consentTemplate.getVersion();
+                String key = buildCompositeKey(
+                        consentTemplate.getDomainName(),
+                        consentTemplate.getName(),
+                        consentTemplate.getVersion(),
+                        "template"
+                );
                 templateMap.put(key, consentTemplate);
                 logger.debug("Mapped template: {}", key);
             }
@@ -396,9 +443,23 @@ public class ConsentPopulator {
     }
 
     /**
-     * Validate that the request has all required fields
-     * FIXED: Added null safety for module decisions
+     * Build composite key with validation
+     * FIXED: Prevents "null;null;null" keys and validates components
      */
+    private String buildCompositeKey(String domain, String name, String version, String type) {
+        if (domain == null || domain.trim().isEmpty()) {
+            throw new IllegalArgumentException(type + " domain cannot be null or empty");
+        }
+        if (name == null || name.trim().isEmpty()) {
+            throw new IllegalArgumentException(type + " name cannot be null or empty");
+        }
+        if (version == null || version.trim().isEmpty()) {
+            throw new IllegalArgumentException(type + " version cannot be null or empty");
+        }
+
+        return domain.trim() + ";" + name.trim() + ";" + version.trim();
+    }
+
     private void validateRequest(ConsentRequest request) {
         if (request == null) {
             throw new IllegalArgumentException("Consent request cannot be null");
@@ -416,7 +477,6 @@ public class ConsentPopulator {
             throw new IllegalArgumentException("Module decisions are required");
         }
 
-        // FIXED: Validate each decision has required fields
         for (ModuleDecision decision : request.getModuleDecisions()) {
             if (decision == null) {
                 throw new IllegalArgumentException("Module decision cannot be null");
@@ -427,7 +487,6 @@ public class ConsentPopulator {
             if (decision.getStatus() == null || decision.getStatus().isEmpty()) {
                 throw new IllegalArgumentException("Module decision must have a status");
             }
-            // FIXED: Validate status values (case-insensitive)
             String upperStatus = decision.getStatus().toUpperCase();
             if (!"ACCEPTED".equals(upperStatus) && !"DECLINED".equals(upperStatus) &&
                     !"PERMIT".equals(upperStatus) && !"DENY".equals(upperStatus)) {

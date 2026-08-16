@@ -15,7 +15,7 @@ import javax.annotation.PostConstruct;
 /**
  * Service for validating FHIR resources
  * FIXED: Reusable validator instance - initialized once, reused many times
- * FIXED: Accepts Resource directly for better compatibility
+ * FIXED: Uses only available FhirInstanceValidator methods
  */
 public class FhirValidatorService {
 
@@ -23,7 +23,7 @@ public class FhirValidatorService {
 
     private final FhirContext fhirContext;
     private final ValidationSupportChain supportChain;
-    private FhirValidator validator;  // Reusable instance
+    private FhirValidator validator;
     private boolean initialized = false;
 
     public FhirValidatorService(FhirContext fhirContext, ValidationSupportChain supportChain) {
@@ -32,7 +32,7 @@ public class FhirValidatorService {
     }
 
     /**
-     * Initialize the validator once - called after construction or when support chain is ready
+     * Initialize the validator once with full profile validation support
      */
     @PostConstruct
     public void init() {
@@ -40,12 +40,41 @@ public class FhirValidatorService {
             return;
         }
 
-        logger.info("Initializing FhirValidator with support chain");
+        logger.info("Initializing FhirValidator with validation support");
 
         try {
-            // Create validator once and reuse it
+            // Create FhirInstanceValidator with support chain
             FhirInstanceValidator instanceValidator = new FhirInstanceValidator(fhirContext);
             instanceValidator.setValidationSupport(supportChain);
+
+            // FIXED: Use ONLY methods that exist in the decompiled class
+
+            // Error on unknown profiles - catches undefined profiles
+            instanceValidator.setErrorForUnknownProfiles(true);
+
+            // Assume rest references are valid (default is false)
+            instanceValidator.setAssumeValidRestReferences(false);
+
+            // No terminology checks (false = perform terminology checks)
+            instanceValidator.setNoTerminologyChecks(false);
+
+            // No extensible warnings (false = show extensible warnings)
+            instanceValidator.setNoExtensibleWarnings(false);
+
+            // No binding message suppressed (false = show binding messages)
+            instanceValidator.setNoBindingMsgSuppressed(false);
+
+            // Allow any extensions (false = restrict extensions)
+            instanceValidator.setAnyExtensionsAllowed(false);
+
+            // Set best practice warning level
+            // instanceValidator.setBestPracticeWarningLevel(BestPracticeWarningLevel.HINT);
+            // Note: BestPracticeWarningLevel enum is from org.hl7.fhir.r5.utils.validation.constants
+
+            logger.info("FhirInstanceValidator configured with: " +
+                    "errorForUnknownProfiles=true, assumeValidRestReferences=false, " +
+                    "noTerminologyChecks=false, noExtensibleWarnings=false, " +
+                    "noBindingMsgSuppressed=false, anyExtensionsAllowed=false");
 
             this.validator = fhirContext.newValidator();
             this.validator.registerValidatorModule(instanceValidator);
@@ -60,7 +89,7 @@ public class FhirValidatorService {
 
     /**
      * Validate a resource using the reusable validator
-     * FIXED: Accepts Resource (which extends IBaseResource) directly
+     * Performs full profile validation against the MII profile
      */
     public ValidationResult validate(Resource resource) {
         if (!initialized || validator == null) {
@@ -74,7 +103,21 @@ public class FhirValidatorService {
             ValidationResult result = validator.validateWithResult(resource);
 
             long duration = System.currentTimeMillis() - startTime;
-            logger.debug("Validation completed in {}ms, result: {}", duration, result.isSuccessful());
+
+            if (result.isSuccessful()) {
+                logger.debug("Validation completed successfully in {}ms", duration);
+            } else {
+                long errors = result.getMessages().stream()
+                        .filter(m -> m.getSeverity() != null &&
+                                m.getSeverity().toString().contains("ERROR"))
+                        .count();
+                long warnings = result.getMessages().stream()
+                        .filter(m -> m.getSeverity() != null &&
+                                m.getSeverity().toString().contains("WARNING"))
+                        .count();
+                logger.warn("Validation completed in {}ms with {} errors and {} warnings",
+                        duration, errors, warnings);
+            }
 
             return result;
         } catch (Exception e) {
@@ -84,16 +127,14 @@ public class FhirValidatorService {
     }
 
     /**
-     * Print validation results using SLF4J instead of System.out
-     * Also outputs to console for visibility
+     * Print validation results using SLF4J
      */
     public void printValidationResults(ValidationResult result) {
-        // Log to SLF4J
         logger.info("=== Validation Result ===");
         logger.info("Is Valid: {}", result.isSuccessful());
         logger.info("Total Messages: {}", result.getMessages().size());
 
-        // Also print to console for immediate visibility
+        // Print to console for visibility
         System.out.println("\n=== Validation Result ===");
         System.out.println("Is Valid: " + result.isSuccessful());
         System.out.println("Total Messages: " + result.getMessages().size());
@@ -103,7 +144,6 @@ public class FhirValidatorService {
             String location = msg.getLocationString() != null ? msg.getLocationString() : "";
             String message = msg.getMessage() != null ? msg.getMessage() : "";
 
-            // Log to SLF4J with appropriate level
             if (severity.contains("ERROR")) {
                 logger.error("[{}] {} - {}", severity, location, message);
             } else if (severity.contains("WARNING")) {
@@ -112,14 +152,10 @@ public class FhirValidatorService {
                 logger.info("[{}] {} - {}", severity, location, message);
             }
 
-            // Print to console
             System.out.println("[" + severity + "] " + location + " - " + message);
         }
     }
 
-    /**
-     * Check if validator is initialized
-     */
     public boolean isInitialized() {
         return initialized;
     }
