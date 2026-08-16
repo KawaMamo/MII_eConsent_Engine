@@ -327,6 +327,7 @@ public class ConsentPopulator {
         }
     }
 
+    // Update the validateRequest method to handle null decisions properly
     private void validateRequest(ConsentRequest request) {
         if (request == null) {
             throw new IllegalArgumentException("Consent request cannot be null");
@@ -342,6 +343,19 @@ public class ConsentPopulator {
         }
         if (request.getModuleDecisions() == null || request.getModuleDecisions().isEmpty()) {
             throw new IllegalArgumentException("Module decisions are required");
+        }
+
+        // Validate each decision has a module key
+        for (ModuleDecision decision : request.getModuleDecisions()) {
+            if (decision == null) {
+                throw new IllegalArgumentException("Module decision cannot be null");
+            }
+            if (decision.getModuleKey() == null || decision.getModuleKey().isEmpty()) {
+                throw new IllegalArgumentException("Module decision must have a module key");
+            }
+            if (decision.getStatus() == null) {
+                throw new IllegalArgumentException("Module decision must have a status");
+            }
         }
     }
 
