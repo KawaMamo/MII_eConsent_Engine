@@ -5,6 +5,7 @@ import java.util.*;
 /**
  * Represents the user's consent request/decision
  * All fields except patientId and organizationId are optional
+ * FIXED: Added default values for all placeholder fields
  */
 public class ConsentRequest {
 
@@ -13,19 +14,19 @@ public class ConsentRequest {
     private String patientId;
     private String organizationId;
 
-    // Optional fields for placeholder replacement
-    private String patientName;
-    private String institutionName;
-    private String organizationName;
+    // Optional fields for placeholder replacement (with defaults)
+    private String patientName = "Patient/Patientin";  // FIXED: Default value
+    private String institutionName = "Ihre behandelnde Einrichtung";  // FIXED: Default value
+    private String organizationName = "Ihre Organisation";  // FIXED: Default value
 
-    // Optional fields
+    // Other optional fields
     private Date consentDate;
     private String sourceReference;
     private String mainProvisionType;
     private List<ModuleDecision> moduleDecisions = new ArrayList<>();
     private SignatureData signature;
 
-    // Getters and setters
+    // Getters and setters...
     public String getTemplateKey() { return templateKey; }
     public void setTemplateKey(String templateKey) { this.templateKey = templateKey; }
 
