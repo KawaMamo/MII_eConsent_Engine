@@ -5,6 +5,8 @@ import org.hl7.fhir.r4.model.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.HashMap;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -12,6 +14,7 @@ import java.util.regex.Pattern;
  * Extracts configuration from templates and profiles
  * Responsibility: Extract all configuration values from template and profile
  *
+ * FIXED: Properly trims all key-value tokens from externProperties
  * FIXED: Supports both template-level and domain-level fhirForceProfileConsent
  */
 public class ConfigurationExtractor {
@@ -37,8 +40,62 @@ public class ConfigurationExtractor {
     private static final String FALLBACK_LOINC_DISPLAY = "Privacy consent";
 
     /**
+     * Parse externProperties string into a map of key-value pairs
+     * FIXED: Properly trims each token and handles empty strings
+     */
+    private Map<String, String> parseExternProperties(String externProperties) {
+        Map<String, String> properties = new HashMap<>();
+
+        if (externProperties == null || externProperties.isEmpty()) {
+            return properties;
+        }
+
+        // Split by semicolon and trim each token
+        String[] tokens = externProperties.split(";");
+        for (String token : tokens) {
+            if (token == null || token.trim().isEmpty()) {
+                continue;
+            }
+
+            String trimmedToken = token.trim();
+
+            // Handle key=value format
+            int equalsIndex = trimmedToken.indexOf('=');
+            if (equalsIndex > 0) {
+                String key = trimmedToken.substring(0, equalsIndex).trim();
+                String value = trimmedToken.substring(equalsIndex + 1).trim();
+                if (!key.isEmpty()) {
+                    properties.put(key, value);
+                    logger.debug("Parsed property: {} = {}", key, value);
+                }
+            } else {
+                // Handle key-only format (e.g., "singleUseOnly")
+                properties.put(trimmedToken, "true");
+                logger.debug("Parsed flag property: {}", trimmedToken);
+            }
+        }
+
+        return properties;
+    }
+
+    /**
+     * Get a property value from externProperties with fallback
+     */
+    private String getProperty(Map<String, String> properties, String key) {
+        return properties.get(key);
+    }
+
+    /**
+     * Get a property value or return default
+     */
+    private String getProperty(Map<String, String> properties, String key, String defaultValue) {
+        String value = properties.get(key);
+        return value != null ? value : defaultValue;
+    }
+
+    /**
      * Extract all configuration from template and profile
-     * FIXED: Checks both template and domain externProperties for profile URL
+     * FIXED: Uses proper property parsing
      */
     public TemplateConfiguration extractConfiguration(ConsentTemplate consentTemplate, StructureDefinition miiProfile) {
         LoincCategory loinc = extractLoincCategory(miiProfile);
@@ -46,7 +103,7 @@ public class ConfigurationExtractor {
         String validityPeriod = extractValidityPeriod(consentTemplate);
         Scope scope = extractScope(consentTemplate);
 
-        // FIXED: Try template externProperties first, then fallback to domain
+        // FIXED: Extract profile URL using parsed properties
         String profileUrl = extractProfileUrl(consentTemplate);
         if (profileUrl == null || profileUrl.isEmpty()) {
             throw new IllegalStateException(
@@ -55,14 +112,14 @@ public class ConfigurationExtractor {
             );
         }
 
-        String consentCategory = consentTemplate.getFhirConsentCategory();
+        String consentCategory = extractConsentCategory(consentTemplate);
         if (consentCategory == null || consentCategory.isEmpty()) {
             throw new IllegalStateException(
                     "Template missing fhirConsentCategory in externProperties"
             );
         }
 
-        String policyValueSet = consentTemplate.getFhirPolicyValueSet();
+        String policyValueSet = extractPolicyValueSet(consentTemplate);
         if (policyValueSet == null || policyValueSet.isEmpty()) {
             throw new IllegalStateException(
                     "Template missing fhirPolicyValueSet in externProperties"
@@ -81,35 +138,54 @@ public class ConfigurationExtractor {
 
     /**
      * Extract profile URL from template or domain externProperties
-     * FIXED: Checks both levels
+     * FIXED: Uses parsed properties
      */
     private String extractProfileUrl(ConsentTemplate consentTemplate) {
         // First try template externProperties
         if (consentTemplate.getExternProperties() != null) {
-            String[] props = consentTemplate.getExternProperties().split(";");
-            for (String prop : props) {
-                if (prop.startsWith("fhirForceProfileConsent=")) {
-                    return prop.substring("fhirForceProfileConsent=".length());
-                }
+            Map<String, String> props = parseExternProperties(consentTemplate.getExternProperties());
+            String profileUrl = props.get("fhirForceProfileConsent");
+            if (profileUrl != null && !profileUrl.isEmpty()) {
+                return profileUrl;
             }
         }
 
         // Fallback: Try to get from domain externProperties (for older templates like 1.6.d)
         if (consentTemplate.getDomainName() != null && consentTemplate.getDomainName().equals("MII")) {
-            // The domain externProperties is in the template object
-            // We need to check if the template has domain externProperties
-            // For 1.6.d, the domain externProperties has the profile URL
             String domainExternProperties = consentTemplate.getDomainExternProperties();
             if (domainExternProperties != null && !domainExternProperties.isEmpty()) {
-                String[] props = domainExternProperties.split(";");
-                for (String prop : props) {
-                    if (prop.startsWith("fhirForceProfileConsent=")) {
-                        return prop.substring("fhirForceProfileConsent=".length());
-                    }
+                Map<String, String> props = parseExternProperties(domainExternProperties);
+                String profileUrl = props.get("fhirForceProfileConsent");
+                if (profileUrl != null && !profileUrl.isEmpty()) {
+                    return profileUrl;
                 }
             }
         }
 
+        return null;
+    }
+
+    /**
+     * Extract consent category from template externProperties
+     * FIXED: Uses parsed properties
+     */
+    private String extractConsentCategory(ConsentTemplate consentTemplate) {
+        if (consentTemplate.getExternProperties() != null) {
+            Map<String, String> props = parseExternProperties(consentTemplate.getExternProperties());
+            return props.get("fhirConsentCategory");
+        }
+        return null;
+    }
+
+    /**
+     * Extract policy value set from template externProperties
+     * FIXED: Uses parsed properties
+     */
+    private String extractPolicyValueSet(ConsentTemplate consentTemplate) {
+        if (consentTemplate.getExternProperties() != null) {
+            Map<String, String> props = parseExternProperties(consentTemplate.getExternProperties());
+            return props.get("fhirPolicyValueSet");
+        }
         return null;
     }
 
@@ -190,18 +266,10 @@ public class ConfigurationExtractor {
         String display = DEFAULT_POLICY_RULE_DISPLAY;
 
         if (consentTemplate.getExternProperties() != null) {
-            String[] props = consentTemplate.getExternProperties().split(";");
-            for (String prop : props) {
-                if (prop.startsWith("policyRuleSystem=")) {
-                    system = prop.substring("policyRuleSystem=".length());
-                }
-                if (prop.startsWith("policyRuleCode=")) {
-                    code = prop.substring("policyRuleCode=".length());
-                }
-                if (prop.startsWith("policyRuleDisplay=")) {
-                    display = prop.substring("policyRuleDisplay=".length());
-                }
-            }
+            Map<String, String> props = parseExternProperties(consentTemplate.getExternProperties());
+            system = getProperty(props, "policyRuleSystem", system);
+            code = getProperty(props, "policyRuleCode", code);
+            display = getProperty(props, "policyRuleDisplay", display);
         }
 
         logger.info("Using policy rule: {} ({})", code, system);
@@ -215,10 +283,13 @@ public class ConfigurationExtractor {
             );
         }
 
+        // FIXED: Properly parse expiration properties with trimming
         String[] props = consentTemplate.getExpirationProperties().split(";");
         for (String prop : props) {
-            if (prop != null && prop.startsWith("VALIDITY_PERIOD=")) {
-                String period = prop.substring("VALIDITY_PERIOD=".length());
+            if (prop == null) continue;
+            String trimmedProp = prop.trim();
+            if (trimmedProp.startsWith("VALIDITY_PERIOD=")) {
+                String period = trimmedProp.substring("VALIDITY_PERIOD=".length()).trim();
                 Matcher matcher = VALIDITY_PERIOD_PATTERN.matcher(period);
                 if (!matcher.matches()) {
                     throw new IllegalStateException(
@@ -249,18 +320,10 @@ public class ConfigurationExtractor {
         }
 
         if (consentTemplate.getExternProperties() != null) {
-            String[] props = consentTemplate.getExternProperties().split(";");
-            for (String prop : props) {
-                if (prop.startsWith("scopeSystem=")) {
-                    system = prop.substring("scopeSystem=".length());
-                }
-                if (prop.startsWith("scopeCode=")) {
-                    code = prop.substring("scopeCode=".length());
-                }
-                if (prop.startsWith("scopeDisplay=")) {
-                    display = prop.substring("scopeDisplay=".length());
-                }
-            }
+            Map<String, String> props = parseExternProperties(consentTemplate.getExternProperties());
+            system = getProperty(props, "scopeSystem", system);
+            code = getProperty(props, "scopeCode", code);
+            display = getProperty(props, "scopeDisplay", display);
         }
 
         logger.info("Using scope: {} ({})", code, system);

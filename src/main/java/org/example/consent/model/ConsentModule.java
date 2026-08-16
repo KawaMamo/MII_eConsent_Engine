@@ -5,8 +5,12 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 
 import java.util.List;
 
+/**
+ * Represents a Consent Module from the template
+ */
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class ConsentModule {
+
     @JsonProperty("domainName")
     private String domainName;
 
@@ -40,7 +44,7 @@ public class ConsentModule {
     @JsonProperty("policiesAssignedConsentPolicy")
     private List<PolicyAssignment> policiesAssignedConsentPolicy;
 
-    // Getters and setters
+    // Getters and setters...
     public String getDomainName() { return domainName; }
     public void setDomainName(String domainName) { this.domainName = domainName; }
     public String getName() { return name; }
@@ -68,13 +72,17 @@ public class ConsentModule {
 
     /**
      * Extract FHIR question code from externProperties
+     * FIXED: Uses proper property parsing
      */
     public String getFhirQuestionCode() {
         if (externProperties == null) return null;
+
         String[] props = externProperties.split(";");
         for (String prop : props) {
-            if (prop.startsWith("fhirQuestionCode=")) {
-                return prop.substring("fhirQuestionCode=".length());
+            if (prop == null) continue;
+            String trimmedProp = prop.trim();
+            if (trimmedProp.startsWith("fhirQuestionCode=")) {
+                return trimmedProp.substring("fhirQuestionCode=".length()).trim();
             }
         }
         return null;

@@ -344,4 +344,5 @@ public class ConsentPopulator {
             throw new IllegalArgumentException("Module decisions are required");
         }
     }
+
 }
