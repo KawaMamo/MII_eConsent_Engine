@@ -17,6 +17,12 @@ import java.util.regex.Pattern;
 
 /**
  * Builds the human-readable narrative (text.div) for the Consent resource
+ * Responsibility: Generate HTML narrative with placeholder replacement and decision status
+ *
+ * FIXED: All placeholders have fallback values to prevent raw brackets in output
+ * FIXED: Properly escapes ONLY user-provided content, not HTML structure
+ * FIXED: Conditional placeholder removal uses proper greedy matching
+ * FIXED: Supports full ISO 8601 duration formatting via PeriodCalculator
  */
 public class NarrativeBuilder {
 
@@ -30,19 +36,6 @@ public class NarrativeBuilder {
     private static final Pattern SECTION_PATTERN = Pattern.compile("^(\\d+(?:\\.\\d+)*)\\.");
     private static final Pattern CONDITIONAL_PATTERN = Pattern.compile("\\[falls zutreffend:\\s*([^\\]]*?)\\]");
 
-    // FIXED: Pattern for removing conditional content with proper greedy matching
-    // This matches [falls zutreffend] followed by any content up to the next HTML tag or paragraph break
-    private static final Pattern CONDITIONAL_REMOVE_PATTERN = Pattern.compile(
-            "\\[falls zutreffend\\][^<]*?(?:<[^>]*>)*?",
-            Pattern.DOTALL
-    );
-
-    // More aggressive pattern for removing conditional content including text until the next paragraph
-    private static final Pattern CONDITIONAL_REMOVE_AGGRESSIVE = Pattern.compile(
-            "\\[falls zutreffend\\][^<]*(?:<[^>]*>)*[^<]*",
-            Pattern.DOTALL
-    );
-
     // Default fallback values
     private static final String DEFAULT_PATIENT_NAME = "Patient/Patientin";
     private static final String DEFAULT_INSTITUTION_NAME = "Ihre behandelnde Einrichtung";
@@ -50,9 +43,11 @@ public class NarrativeBuilder {
     private static final String DEFAULT_SECTION = "Abschnitt";
 
     private final ModuleResolver moduleResolver;
+    private final PeriodCalculator periodCalculator;
 
     public NarrativeBuilder(ModuleResolver moduleResolver) {
         this.moduleResolver = moduleResolver;
+        this.periodCalculator = new PeriodCalculator();
     }
 
     /**
@@ -76,6 +71,7 @@ public class NarrativeBuilder {
 
         // Log for debugging
         logger.debug("Final HTML length: {}", finalHtml.length());
+        logger.debug("Final HTML preview: {}", finalHtml.length() > 200 ? finalHtml.substring(0, 200) + "..." : finalHtml);
 
         // Check for remaining placeholders
         Matcher matcher = PLACEHOLDER_PATTERN.matcher(finalHtml);
@@ -196,6 +192,7 @@ public class NarrativeBuilder {
 
     /**
      * Replace placeholders with actual values
+     * FIXED: Escapes ONLY user-provided content, not HTML structure
      * FIXED: Conditional placeholder removal uses proper greedy matching
      */
     private String replacePlaceholders(String text, ConsentTemplate consentTemplate,
@@ -214,7 +211,7 @@ public class NarrativeBuilder {
         result = result.replaceAll("\\[der/dem Name der Einrichtung\\]", escapedInstitution);
         result = result.replaceAll("\\[Name der Einrichtung\\]", escapedInstitution);
 
-        // 2. Conditional placeholders - FIXED
+        // 2. Conditional placeholders
         result = replaceConditionalPlaceholders(result, isAccepted);
 
         // 3. Section numbering
@@ -240,8 +237,8 @@ public class NarrativeBuilder {
         result = result.replaceAll("\\[Organisation\\]", escapedOrg);
         result = result.replaceAll("\\[zuständige Stelle\\]", escapedOrg);
 
-        // 7. Validity period
-        String validityText = formatValidityPeriod(config.validityPeriod);
+        // 7. Validity period - using PeriodCalculator
+        String validityText = periodCalculator.formatValidityPeriod(config.validityPeriod);
         if (validityText == null || validityText.isEmpty()) {
             validityText = "30 Jahre";
         }
@@ -295,23 +292,17 @@ public class NarrativeBuilder {
         // Handle [falls zutreffend] without colon
         if (isAccepted) {
             // For ACCEPTED: remove just the token, keep the content that follows
-            // Example: "[falls zutreffend] und in die Gewinnung" → "und in die Gewinnung"
             result = result.replaceAll("\\[falls zutreffend\\]\\s*", "");
         } else {
-            // FIXED: For DECLINED: remove the token AND all content that follows until the next HTML element
-            // Example: "[falls zutreffend] und in die Gewinnung von Biomaterialien" → "" (removed entirely)
-
-            // First try: Remove [falls zutreffend] and everything until the next paragraph or HTML tag
-            // This uses a more aggressive pattern that matches the token and all following text
+            // For DECLINED: remove the token AND all content that follows until the next HTML element
             result = result.replaceAll("\\[falls zutreffend\\][^<]*?(?:<[^>]*>)*?[^<]*", "");
 
-            // Second pass: Clean up any leftover whitespace or punctuation
+            // Clean up any leftover whitespace or punctuation
             result = result.replaceAll("\\s*,\\s*", ", ");
             result = result.replaceAll("\\s+\\.", ".");
             result = result.replaceAll("\\s+", " ");
 
             // If there are still remnants, try a different approach
-            // Look for the token and remove everything until the next period, semicolon, or HTML tag
             Pattern aggressivePattern = Pattern.compile(
                     "\\[falls zutreffend\\][^;.,!?<>]*[;.,!?]?",
                     Pattern.DOTALL
@@ -321,9 +312,7 @@ public class NarrativeBuilder {
 
         // Handle "Falls zutreffend:" without brackets (plain text)
         if (!isAccepted) {
-            // Remove "Falls zutreffend:" and everything until the next period or HTML tag
             result = result.replaceAll("Falls zutreffend:[^<]*?(?:<[^>]*>)*?[^<]*", "");
-            // Also handle variations
             result = result.replaceAll("Falls zutreffend[^<]*?(?:<[^>]*>)*?[^<]*", "");
         }
 
@@ -338,31 +327,9 @@ public class NarrativeBuilder {
         return result;
     }
 
-    private String formatValidityPeriod(String period) {
-        if (period == null) return null;
-
-        Pattern pattern = Pattern.compile("P(\\d+)([YMD])");
-        Matcher matcher = pattern.matcher(period);
-        if (!matcher.matches()) {
-            if (period.startsWith("P")) {
-                return period.replace("P", "");
-            }
-            return period;
-        }
-
-        int amount = Integer.parseInt(matcher.group(1));
-        String unit = matcher.group(2);
-
-        switch (unit) {
-            case "Y": return amount + " Jahr" + (amount > 1 ? "e" : "");
-            case "M": return amount + " Monat" + (amount > 1 ? "e" : "");
-            case "D": return amount + " Tag" + (amount > 1 ? "e" : "");
-            default: return period;
-        }
-    }
-
     /**
      * Clean HTML - ensures valid XHTML
+     * FIXED: Does NOT escape HTML tags - only ensures well-formed structure
      */
     private String cleanHtml(String html) {
         if (html == null || html.isEmpty()) {
@@ -371,16 +338,19 @@ public class NarrativeBuilder {
         }
 
         try {
+            // Try to use JSoup for cleaning
             Document doc = Jsoup.parse(html, "", Parser.xmlParser());
             doc.outputSettings().syntax(Document.OutputSettings.Syntax.xml);
 
             String result = doc.body().html();
 
+            // If JSoup returns empty, use the original
             if (result == null || result.isEmpty()) {
                 logger.warn("JSoup returned empty, using original HTML");
                 return html;
             }
 
+            // Ensure namespace
             if (!result.startsWith("<div xmlns=\"http://www.w3.org/1999/xhtml\"")) {
                 result = "<div xmlns=\"http://www.w3.org/1999/xhtml\">" + result + "</div>";
             }
@@ -389,6 +359,7 @@ public class NarrativeBuilder {
         } catch (Exception e) {
             logger.warn("JSoup cleaning failed, using original HTML with basic fixes", e);
 
+            // Basic fixes - don't escape tags
             String cleaned = html;
             cleaned = cleaned.replaceAll("<br>", "<br/>");
             cleaned = cleaned.replaceAll("<br\\s+/>", "<br/>");
