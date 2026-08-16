@@ -137,7 +137,7 @@ public class Main {
             // SYSTEM: Generate Consent
             // ==========================================
             System.out.println("\n--- SYSTEM: Generating Consent ---");
-            Consent consent = populator.populateConsent(request);
+            Consent consent = populator.populateConsent(request, miiSnapshot);
 
             // ==========================================
             // SYSTEM: Validate
