@@ -15,11 +15,15 @@ import org.hl7.fhir.common.hapi.validation.support.SnapshotGeneratingValidationS
 import org.hl7.fhir.common.hapi.validation.support.ValidationSupportChain;
 import org.hl7.fhir.r4.model.Consent;
 import org.hl7.fhir.r4.model.StructureDefinition;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Date;
 import java.util.List;
 
 public class Main {
+
+    private static final Logger logger = LoggerFactory.getLogger(Main.class);
 
     private static final String RESOURCES_PATH = "src/main/resources/";
 
@@ -40,12 +44,14 @@ public class Main {
         IParser jsonParser = fhirContext.newJsonParser();
 
         try {
+            System.out.println("=== FHIR Consent Management System ===\n");
+            System.out.println("--- ADMIN: Loading Resources ---");
+            logger.info("=== FHIR Consent Management System ===\n");
+            logger.info("--- ADMIN: Loading Resources ---");
+
             // ==========================================
             // ADMIN: Load Resources
             // ==========================================
-            System.out.println("=== FHIR Consent Management System ===\n");
-            System.out.println("--- ADMIN: Loading Resources ---");
-
             FhirResourceLoader resourceLoader = new FhirResourceLoader(fhirContext, jsonParser);
 
             StructureDefinition germanConsentBase = resourceLoader.loadStructureDefinition(Constants.GERMAN_CONSENT_PROFILE);
@@ -62,20 +68,28 @@ public class Main {
 
             String templateKey = extractTemplateKey(template);
             System.out.println("Active Template: " + templateKey);
+            logger.info("Active Template: {}", templateKey);
 
             // ==========================================
-            // ADMIN: Setup Validation
+            // ADMIN: Setup Validation (Optimized)
             // ==========================================
             System.out.println("\n--- ADMIN: Setting up validation ---");
+            logger.info("\n--- ADMIN: Setting up validation ---");
 
+            // Create factory - it initializes all components once
             ValidationSupportFactory supportFactory = new ValidationSupportFactory(
                     fhirContext,
                     resourceLoader.getPrePopulatedSupport()
             );
 
-            ValidationSupportChain supportChain = supportFactory.createSupportChain();
-            SnapshotGeneratingValidationSupport snapshotSupport = supportFactory.createSnapshotSupport();
+            // Initialize the factory
+            supportFactory.init();
 
+            // Get the shared instances
+            ValidationSupportChain supportChain = supportFactory.getSupportChain();
+            SnapshotGeneratingValidationSupport snapshotSupport = supportFactory.getSnapshotSupport();
+
+            // Generate snapshots using optimized service
             SnapshotGeneratorService snapshotService = new SnapshotGeneratorService(
                     supportChain,
                     snapshotSupport
@@ -94,53 +108,67 @@ public class Main {
             resourceLoader.getPrePopulatedSupport().addStructureDefinition(miiSnapshot);
 
             System.out.println("Profile snapshots generated successfully");
+            logger.info("Profile snapshots generated successfully");
 
             // ==========================================
             // USER: Show Modules
             // ==========================================
             System.out.println("\n--- USER: Available Modules ---");
+            logger.info("\n--- USER: Available Modules ---");
 
-            // FIXED: Pass miiSnapshot to constructor (even though not used until populateConsent)
             ConsentPopulator populator = new ConsentPopulator(template, miiSnapshot);
             List<ModuleInfo> modules = populator.getModulesForTemplate(templateKey);
 
             System.out.println("Total modules available: " + modules.size());
+            logger.info("Total modules available: {}", modules.size());
             for (ModuleInfo module : modules) {
-                System.out.println("  " + module.getOrderNumber() + ". " +
-                        module.getModuleLabel() + " [" +
-                        (module.isMandatory() ? "MANDATORY" : "OPTIONAL") + "]");
+                String status = module.isMandatory() ? "MANDATORY" : "OPTIONAL";
+                System.out.println("  " + module.getOrderNumber() + ". " + module.getModuleLabel() + " [" + status + "]");
+                logger.info("  {}: {} [{}]", module.getOrderNumber(), module.getModuleLabel(), status);
             }
 
             // ==========================================
             // USER: Submit Consent Request
             // ==========================================
             System.out.println("\n--- USER: Submitting Consent ---");
+            logger.info("\n--- USER: Submitting Consent ---");
 
             ConsentRequest request = createConsentRequest(templateKey, modules);
 
+            long acceptedCount = request.getModuleDecisions().stream()
+                    .filter(d -> "ACCEPTED".equals(d.getStatus()))
+                    .count();
+            long declinedCount = request.getModuleDecisions().stream()
+                    .filter(d -> "DECLINED".equals(d.getStatus()))
+                    .count();
+
             System.out.println("Consent request created for patient: " + request.getPatientId());
-            System.out.println("  Accepted modules: " +
-                    request.getModuleDecisions().stream()
-                            .filter(d -> "ACCEPTED".equals(d.getStatus()))
-                            .count());
-            System.out.println("  Declined modules: " +
-                    request.getModuleDecisions().stream()
-                            .filter(d -> "DECLINED".equals(d.getStatus()))
-                            .count());
+            System.out.println("  Accepted modules: " + acceptedCount);
+            System.out.println("  Declined modules: " + declinedCount);
+            logger.info("Consent request created for patient: {}", request.getPatientId());
+            logger.info("  Accepted modules: {}", acceptedCount);
+            logger.info("  Declined modules: {}", declinedCount);
 
             // ==========================================
             // SYSTEM: Generate Consent
             // ==========================================
             System.out.println("\n--- SYSTEM: Generating Consent ---");
+            logger.info("\n--- SYSTEM: Generating Consent ---");
 
-            // FIXED: Pass miiSnapshot to populateConsent (where it's actually used)
             Consent consent = populator.populateConsent(request, miiSnapshot);
+            System.out.println("Consent generated successfully");
+            logger.info("Consent generated successfully");
 
             // ==========================================
-            // SYSTEM: Validate
+            // SYSTEM: Validate (using optimized validator)
             // ==========================================
             System.out.println("\n--- SYSTEM: Validating Consent ---");
+            logger.info("\n--- SYSTEM: Validating Consent ---");
+
+            // Create validator service - it will initialize the validator once
             FhirValidatorService validatorService = new FhirValidatorService(fhirContext, supportChain);
+            validatorService.init(); // Initialize the reusable validator
+
             ValidationResult validationResult = validatorService.validate(consent);
             validatorService.printValidationResults(validationResult);
 
@@ -156,6 +184,7 @@ public class Main {
 
         } catch (Exception e) {
             System.err.println("\n❌ Error during FHIR resource processing: " + e.getMessage());
+            logger.error("Error during FHIR resource processing", e);
             e.printStackTrace();
             System.exit(1);
         }
@@ -185,12 +214,20 @@ public class Main {
         request.setPatientName("Max Mustermann");
 
         for (ModuleInfo module : modules) {
+            if (ModuleTypeDetector.isIntroModule(module.getModuleKey())) {
+                continue;
+            }
+
             ModuleDecision decision = new ModuleDecision();
             decision.setModuleKey(module.getModuleKey());
             decision.setModuleName(module.getModuleName());
 
-            // Accept first 3 modules (0, 1, 2), decline the rest
-            if (module.getOrderNumber() < 3) {
+            // Accept first 3 non-intro modules, decline the rest
+            long acceptedCount = request.getModuleDecisions().stream()
+                    .filter(d -> "ACCEPTED".equals(d.getStatus()))
+                    .count();
+
+            if (acceptedCount < 3) {
                 decision.setStatus("ACCEPTED");
                 decision.setProvisionType("permit");
             } else {
@@ -215,5 +252,16 @@ public class Main {
         System.out.println("Consent Date: " + request.getConsentDate());
         System.out.println("Validation: " + (validationResult.isSuccessful() ? "PASSED ✓" : "FAILED ✗"));
         System.out.println("Messages: " + validationResult.getMessages().size());
+
+        logger.info("\n=== Summary ===");
+        logger.info("Domain: {}", template.getDomain().getName());
+        logger.info("Supported Version: {}", template.getSupportedVersion());
+        logger.info("Profile URL: {}", miiSnapshot.getUrl());
+        logger.info("Profile Version: {}", miiSnapshot.getVersion());
+        logger.info("Patient: {}", request.getPatientId());
+        logger.info("Organization: {}", request.getOrganizationId());
+        logger.info("Consent Date: {}", request.getConsentDate());
+        logger.info("Validation: {}", validationResult.isSuccessful() ? "PASSED ✓" : "FAILED ✗");
+        logger.info("Messages: {}", validationResult.getMessages().size());
     }
 }
