@@ -116,7 +116,7 @@ public class Main {
             System.out.println("\n--- USER: Available Modules ---");
             logger.info("\n--- USER: Available Modules ---");
 
-            ConsentPopulator populator = new ConsentPopulator(template, miiSnapshot);
+            ConsentPopulator populator = new ConsentPopulator(template);
             List<ModuleInfo> modules = populator.getModulesForTemplate(templateKey);
 
             System.out.println("Total modules available: " + modules.size());

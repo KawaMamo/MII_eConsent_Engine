@@ -84,7 +84,7 @@ public class TestRunner {
         ConsentTemplateLoader templateLoader = new ConsentTemplateLoader();
         ExchangeFormatDefinition template = templateLoader.loadFromFile(templatePath);
 
-        ConsentPopulator populator = new ConsentPopulator(template, miiSnapshot);
+        ConsentPopulator populator = new ConsentPopulator(template);
 
         // Get modules
         List<ModuleInfo> modules = populator.getModulesForTemplate(templateKey);

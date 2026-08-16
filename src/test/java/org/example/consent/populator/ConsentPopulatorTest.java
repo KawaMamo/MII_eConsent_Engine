@@ -142,7 +142,7 @@ class ConsentPopulatorTest {
     @DisplayName("Should populate consent with mixed decisions")
     void shouldPopulateConsentWithMixedDecisions(ConsentTestData testData) throws Exception {
         ExchangeFormatDefinition template = templateLoader.loadFromClasspath(testData.templatePath);
-        ConsentPopulator populator = new ConsentPopulator(template, miiSnapshot);
+        ConsentPopulator populator = new ConsentPopulator(template);
 
         List<ModuleInfo> modules = populator.getModulesForTemplate(testData.templateKey);
         assertEquals(testData.expectedTotalModules, modules.size());
@@ -190,7 +190,7 @@ class ConsentPopulatorTest {
     @DisplayName("Should populate consent with all modules accepted")
     void shouldPopulateConsentWithAllModulesAccepted(ConsentTestData testData) throws Exception {
         ExchangeFormatDefinition template = templateLoader.loadFromClasspath(testData.templatePath);
-        ConsentPopulator populator = new ConsentPopulator(template, miiSnapshot);
+        ConsentPopulator populator = new ConsentPopulator(template);
 
         List<ModuleInfo> modules = populator.getModulesForTemplate(testData.templateKey);
         assertEquals(testData.expectedTotalModules, modules.size());
@@ -227,7 +227,7 @@ class ConsentPopulatorTest {
     @DisplayName("Should handle missing patient ID with proper exception")
     void shouldHandleMissingPatientId() throws Exception {
         ExchangeFormatDefinition template = templateLoader.loadFromClasspath(TEMPLATE_1_7_2);
-        ConsentPopulator populator = new ConsentPopulator(template, miiSnapshot);
+        ConsentPopulator populator = new ConsentPopulator(template);
 
         ConsentRequest request = new ConsentRequest();
         request.setTemplateKey("MII;Patienteneinwilligung MII mit Erweiterungsmodul PROM;1.7.b");
@@ -242,7 +242,7 @@ class ConsentPopulatorTest {
     @DisplayName("Should handle missing organization ID with proper exception")
     void shouldHandleMissingOrganizationId() throws Exception {
         ExchangeFormatDefinition template = templateLoader.loadFromClasspath(TEMPLATE_1_7_2);
-        ConsentPopulator populator = new ConsentPopulator(template, miiSnapshot);
+        ConsentPopulator populator = new ConsentPopulator(template);
 
         ConsentRequest request = new ConsentRequest();
         request.setTemplateKey("MII;Patienteneinwilligung MII mit Erweiterungsmodul PROM;1.7.b");
@@ -257,7 +257,7 @@ class ConsentPopulatorTest {
     @DisplayName("Should handle missing module decisions with proper exception")
     void shouldHandleMissingModuleDecisions() throws Exception {
         ExchangeFormatDefinition template = templateLoader.loadFromClasspath(TEMPLATE_1_7_2);
-        ConsentPopulator populator = new ConsentPopulator(template, miiSnapshot);
+        ConsentPopulator populator = new ConsentPopulator(template);
 
         ConsentRequest request = new ConsentRequest();
         request.setTemplateKey("MII;Patienteneinwilligung MII mit Erweiterungsmodul PROM;1.7.b");
@@ -272,7 +272,7 @@ class ConsentPopulatorTest {
     @DisplayName("Should handle null request with proper exception")
     void shouldHandleNullRequest() throws Exception {
         ExchangeFormatDefinition template = templateLoader.loadFromClasspath(TEMPLATE_1_7_2);
-        ConsentPopulator populator = new ConsentPopulator(template, miiSnapshot);
+        ConsentPopulator populator = new ConsentPopulator(template);
 
         assertThrows(IllegalArgumentException.class,
                 () -> populator.populateConsent(null, miiSnapshot));
@@ -286,7 +286,7 @@ class ConsentPopulatorTest {
     @DisplayName("Should handle special XML characters in patient name safely")
     void shouldHandleSpecialCharactersInPatientName() throws Exception {
         ExchangeFormatDefinition template = templateLoader.loadFromClasspath(TEMPLATE_1_7_2);
-        ConsentPopulator populator = new ConsentPopulator(template, miiSnapshot);
+        ConsentPopulator populator = new ConsentPopulator(template);
 
         List<ModuleInfo> modules = populator.getModulesForTemplate(
                 "MII;Patienteneinwilligung MII mit Erweiterungsmodul PROM;1.7.b");
@@ -312,7 +312,7 @@ class ConsentPopulatorTest {
     @DisplayName("Should handle special XML characters in institution name safely")
     void shouldHandleSpecialCharactersInInstitutionName() throws Exception {
         ExchangeFormatDefinition template = templateLoader.loadFromClasspath(TEMPLATE_1_7_2);
-        ConsentPopulator populator = new ConsentPopulator(template, miiSnapshot);
+        ConsentPopulator populator = new ConsentPopulator(template);
 
         List<ModuleInfo> modules = populator.getModulesForTemplate(
                 "MII;Patienteneinwilligung MII mit Erweiterungsmodul PROM;1.7.b");
@@ -342,7 +342,7 @@ class ConsentPopulatorTest {
     @DisplayName("Should maintain date consistency between consent.dateTime and provision.period.start")
     void shouldMaintainDateConsistency() throws Exception {
         ExchangeFormatDefinition template = templateLoader.loadFromClasspath(TEMPLATE_1_7_2);
-        ConsentPopulator populator = new ConsentPopulator(template, miiSnapshot);
+        ConsentPopulator populator = new ConsentPopulator(template);
 
         List<ModuleInfo> modules = populator.getModulesForTemplate(
                 "MII;Patienteneinwilligung MII mit Erweiterungsmodul PROM;1.7.b");
@@ -381,7 +381,7 @@ class ConsentPopulatorTest {
     void shouldPreserveDecisionsInFallbackNarrative() throws Exception {
         // Given
         ExchangeFormatDefinition template = templateLoader.loadFromClasspath(TEMPLATE_1_7_2);
-        ConsentPopulator populator = new ConsentPopulator(template, miiSnapshot);
+        ConsentPopulator populator = new ConsentPopulator(template);
 
         List<ModuleInfo> modules = populator.getModulesForTemplate(
                 "MII;Patienteneinwilligung MII mit Erweiterungsmodul PROM;1.7.b");
@@ -426,7 +426,7 @@ class ConsentPopulatorTest {
     @DisplayName("Should handle policy with null FHIR code gracefully")
     void shouldHandleNullPolicyCode() throws Exception {
         ExchangeFormatDefinition template = templateLoader.loadFromClasspath(TEMPLATE_1_7_2);
-        ConsentPopulator populator = new ConsentPopulator(template, miiSnapshot);
+        ConsentPopulator populator = new ConsentPopulator(template);
 
         List<ModuleInfo> modules = populator.getModulesForTemplate(
                 "MII;Patienteneinwilligung MII mit Erweiterungsmodul PROM;1.7.b");
