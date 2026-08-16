@@ -11,11 +11,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.annotation.PostConstruct;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Service for validating FHIR resources
- * FIXED: Reusable validator instance - initialized once, reused many times
- * FIXED: Uses only available FhirInstanceValidator methods
+ * FIXED: Thread-safe with double-check locking
+ * FIXED: Correct enum comparison for severity using getCode()
  */
 public class FhirValidatorService {
 
@@ -23,8 +25,10 @@ public class FhirValidatorService {
 
     private final FhirContext fhirContext;
     private final ValidationSupportChain supportChain;
+    private final ReentrantLock initLock = new ReentrantLock();
+    private final AtomicBoolean initialized = new AtomicBoolean(false);
+
     private FhirValidator validator;
-    private boolean initialized = false;
 
     public FhirValidatorService(FhirContext fhirContext, ValidationSupportChain supportChain) {
         this.fhirContext = fhirContext;
@@ -33,68 +37,67 @@ public class FhirValidatorService {
 
     /**
      * Initialize the validator once with full profile validation support
+     * Thread-safe with double-check locking
      */
     @PostConstruct
     public void init() {
-        if (initialized) {
+        // Fast path: already initialized
+        if (initialized.get()) {
             return;
         }
 
-        logger.info("Initializing FhirValidator with validation support");
-
+        // Lock to prevent concurrent initialization
+        initLock.lock();
         try {
-            // Create FhirInstanceValidator with support chain
-            FhirInstanceValidator instanceValidator = new FhirInstanceValidator(fhirContext);
-            instanceValidator.setValidationSupport(supportChain);
+            // Double-check: another thread might have initialized while we waited
+            if (initialized.get()) {
+                return;
+            }
 
-            // FIXED: Use ONLY methods that exist in the decompiled class
+            logger.info("Initializing FhirValidator with validation support");
 
-            // Error on unknown profiles - catches undefined profiles
-            instanceValidator.setErrorForUnknownProfiles(true);
+            try {
+                // Create FhirInstanceValidator with support chain
+                FhirInstanceValidator instanceValidator = new FhirInstanceValidator(fhirContext);
+                instanceValidator.setValidationSupport(supportChain);
 
-            // Assume rest references are valid (default is false)
-            instanceValidator.setAssumeValidRestReferences(false);
+                // Configure validation settings
+                instanceValidator.setErrorForUnknownProfiles(true);
+                instanceValidator.setAssumeValidRestReferences(false);
+                instanceValidator.setNoTerminologyChecks(false);
+                instanceValidator.setNoExtensibleWarnings(false);
+                instanceValidator.setNoBindingMsgSuppressed(false);
+                instanceValidator.setAnyExtensionsAllowed(false);
 
-            // No terminology checks (false = perform terminology checks)
-            instanceValidator.setNoTerminologyChecks(false);
+                this.validator = fhirContext.newValidator();
+                this.validator.registerValidatorModule(instanceValidator);
 
-            // No extensible warnings (false = show extensible warnings)
-            instanceValidator.setNoExtensibleWarnings(false);
+                // Mark as initialized (atomic operation)
+                initialized.set(true);
 
-            // No binding message suppressed (false = show binding messages)
-            instanceValidator.setNoBindingMsgSuppressed(false);
-
-            // Allow any extensions (false = restrict extensions)
-            instanceValidator.setAnyExtensionsAllowed(false);
-
-            // Set best practice warning level
-            // instanceValidator.setBestPracticeWarningLevel(BestPracticeWarningLevel.HINT);
-            // Note: BestPracticeWarningLevel enum is from org.hl7.fhir.r5.utils.validation.constants
-
-            logger.info("FhirInstanceValidator configured with: " +
-                    "errorForUnknownProfiles=true, assumeValidRestReferences=false, " +
-                    "noTerminologyChecks=false, noExtensibleWarnings=false, " +
-                    "noBindingMsgSuppressed=false, anyExtensionsAllowed=false");
-
-            this.validator = fhirContext.newValidator();
-            this.validator.registerValidatorModule(instanceValidator);
-
-            initialized = true;
-            logger.info("FhirValidator initialized successfully");
-        } catch (Exception e) {
-            logger.error("Failed to initialize FhirValidator", e);
-            throw new RuntimeException("Failed to initialize validator", e);
+                logger.info("FhirValidator initialized successfully");
+            } catch (Exception e) {
+                logger.error("Failed to initialize FhirValidator", e);
+                throw new RuntimeException("Failed to initialize validator", e);
+            }
+        } finally {
+            initLock.unlock();
         }
     }
 
     /**
      * Validate a resource using the reusable validator
-     * Performs full profile validation against the MII profile
+     * Thread-safe with double-check locking
      */
     public ValidationResult validate(Resource resource) {
-        if (!initialized || validator == null) {
-            logger.warn("Validator not initialized, initializing now");
+        // Lazy initialization with double-check locking
+        if (!initialized.get()) {
             init();
+        }
+
+        // Guard against null if initialization failed
+        if (validator == null) {
+            throw new IllegalStateException("Validator not initialized properly");
         }
 
         long startTime = System.currentTimeMillis();
@@ -107,16 +110,21 @@ public class FhirValidatorService {
             if (result.isSuccessful()) {
                 logger.debug("Validation completed successfully in {}ms", duration);
             } else {
+                // FIXED: Use getCode() for severity comparison
                 long errors = result.getMessages().stream()
                         .filter(m -> m.getSeverity() != null &&
-                                m.getSeverity().toString().contains("ERROR"))
+                                "ERROR".equals(m.getSeverity().getCode()))
                         .count();
                 long warnings = result.getMessages().stream()
                         .filter(m -> m.getSeverity() != null &&
-                                m.getSeverity().toString().contains("WARNING"))
+                                "WARNING".equals(m.getSeverity().getCode()))
                         .count();
-                logger.warn("Validation completed in {}ms with {} errors and {} warnings",
-                        duration, errors, warnings);
+                long infos = result.getMessages().stream()
+                        .filter(m -> m.getSeverity() != null &&
+                                "INFO".equals(m.getSeverity().getCode()))
+                        .count();
+                logger.warn("Validation completed in {}ms with {} errors, {} warnings, {} infos",
+                        duration, errors, warnings, infos);
             }
 
             return result;
@@ -128,6 +136,7 @@ public class FhirValidatorService {
 
     /**
      * Print validation results using SLF4J
+     * FIXED: Correct enum comparison using getCode()
      */
     public void printValidationResults(ValidationResult result) {
         logger.info("=== Validation Result ===");
@@ -139,24 +148,38 @@ public class FhirValidatorService {
         System.out.println("Is Valid: " + result.isSuccessful());
         System.out.println("Total Messages: " + result.getMessages().size());
 
+        // FIXED: Use getCode() for severity comparison
         for (SingleValidationMessage msg : result.getMessages()) {
-            String severity = msg.getSeverity() != null ? msg.getSeverity().toString() : "UNKNOWN";
+            String severity;
+            if (msg.getSeverity() == null) {
+                severity = "UNKNOWN";
+            } else {
+                severity = msg.getSeverity().toString();
+            }
             String location = msg.getLocationString() != null ? msg.getLocationString() : "";
             String message = msg.getMessage() != null ? msg.getMessage() : "";
 
-            if (severity.contains("ERROR")) {
-                logger.error("[{}] {} - {}", severity, location, message);
-            } else if (severity.contains("WARNING")) {
-                logger.warn("[{}] {} - {}", severity, location, message);
+            // FIXED: Direct enum comparison using getCode()
+            if (msg.getSeverity() != null) {
+                String severityCode = msg.getSeverity().getCode();
+                if ("ERROR".equals(severityCode)) {
+                    logger.error("[{}] {} - {}", severity, location, message);
+                    System.out.println("[" + severity + "] " + location + " - " + message);
+                } else if ("WARNING".equals(severityCode)) {
+                    logger.warn("[{}] {} - {}", severity, location, message);
+                    System.out.println("[" + severity + "] " + location + " - " + message);
+                } else {
+                    logger.info("[{}] {} - {}", severity, location, message);
+                    System.out.println("[" + severity + "] " + location + " - " + message);
+                }
             } else {
                 logger.info("[{}] {} - {}", severity, location, message);
+                System.out.println("[" + severity + "] " + location + " - " + message);
             }
-
-            System.out.println("[" + severity + "] " + location + " - " + message);
         }
     }
 
     public boolean isInitialized() {
-        return initialized;
+        return initialized.get();
     }
 }

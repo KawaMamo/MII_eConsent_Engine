@@ -9,7 +9,8 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Service for generating profile snapshots
- * FIXED: No stale context - creates fresh context each time
+ * FIXED: Properly passes profile name and URL
+ * FIXED: Creates fresh context each time to avoid stale references
  */
 public class SnapshotGeneratorService {
 
@@ -27,30 +28,37 @@ public class SnapshotGeneratorService {
 
     /**
      * Generate a snapshot for a StructureDefinition
-     * FIXED: Creates fresh ValidationSupportContext each time
+     * FIXED: Properly passes profile name and URL
+     * Creates fresh ValidationSupportContext each time
      */
     public StructureDefinition generateSnapshot(StructureDefinition profile, String baseDefinition) {
         long startTime = System.currentTimeMillis();
 
         try {
-            logger.info("Generating snapshot for: {}", profile.getUrl());
+            String profileUrl = profile.getUrl();
+            String profileName = profile.getName();
+
+            logger.info("Generating snapshot for: {} (name: {})", profileUrl, profileName);
 
             // FIXED: Create fresh context for each call to avoid stale references
             ValidationSupportContext validationContext = new ValidationSupportContext(supportChain);
 
+            // FIXED: Pass the profile name instead of null
+            // The generateSnapshot method signature:
+            // generateSnapshot(ValidationSupportContext context, StructureDefinition input,
+            //                  String theUrl, String theProfileName, String baseDefinition)
             StructureDefinition snapshot = (StructureDefinition) snapshotSupport.generateSnapshot(
                     validationContext,
                     profile,
-                    profile.getUrl(),
-                    null,
+                    profileUrl,      // theUrl - use profile URL
+                    profileName,     // theProfileName - use profile name (was null)
                     baseDefinition
             );
 
             long duration = System.currentTimeMillis() - startTime;
-            logger.info("Snapshot generated successfully for: {} in {}ms", profile.getUrl(), duration);
+            logger.info("Snapshot generated successfully for: {} in {}ms", profileUrl, duration);
 
-            // Also print to console for visibility
-            System.out.println("Snapshot generated successfully for: " + profile.getUrl());
+            System.out.println("Snapshot generated successfully for: " + profileUrl);
 
             return snapshot;
         } catch (Exception e) {

@@ -10,13 +10,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.annotation.PostConstruct;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
  * Factory for creating validation support chains
- * FIXED:
- * - prePopulatedSupport placed FIRST for custom profile precedence
- * - Single SnapshotGeneratingValidationSupport instance shared
- * - Maintains backward compatibility with existing tests
+ * FIXED: Thread-safe with read-write locks
+ * FIXED: prePopulatedSupport placed FIRST for custom profile precedence
+ * FIXED: Single SnapshotGeneratingValidationSupport instance shared
  */
 public class ValidationSupportFactory {
 
@@ -25,7 +26,11 @@ public class ValidationSupportFactory {
     private final FhirContext fhirContext;
     private final PrePopulatedValidationSupport prePopulatedSupport;
 
-    // FIXED: Single instance, reused
+    // ReentrantReadWriteLock for thread-safe reads and writes
+    private final ReentrantReadWriteLock rwLock = new ReentrantReadWriteLock();
+    private final AtomicBoolean initialized = new AtomicBoolean(false);
+
+    // Single instances - protected by the lock
     private SnapshotGeneratingValidationSupport snapshotSupport;
     private InMemoryTerminologyServerValidationSupport terminologySupport;
     private DefaultProfileValidationSupport defaultSupport;
@@ -38,76 +43,113 @@ public class ValidationSupportFactory {
 
     /**
      * Initialize all support components once
+     * Thread-safe with double-check locking
      */
     @PostConstruct
     public void init() {
-        logger.info("Initializing ValidationSupportFactory");
+        if (initialized.get()) {
+            return;
+        }
 
-        // Create single instances
-        this.snapshotSupport = new SnapshotGeneratingValidationSupport(fhirContext);
-        this.terminologySupport = new InMemoryTerminologyServerValidationSupport(fhirContext);
-        this.defaultSupport = new DefaultProfileValidationSupport(fhirContext);
+        rwLock.writeLock().lock();
+        try {
+            // Double-check
+            if (initialized.get()) {
+                return;
+            }
 
-        // FIXED: prePopulatedSupport FIRST for custom profile precedence
-        this.supportChain = new ValidationSupportChain(
-                prePopulatedSupport,        // CUSTOM profiles FIRST (highest priority)
-                terminologySupport,         // Terminology validation
-                defaultSupport,             // Base FHIR definitions (fallback)
-                snapshotSupport             // Snapshot generation
-        );
+            logger.info("Initializing ValidationSupportFactory");
 
-        logger.info("ValidationSupportFactory initialized with custom profiles first");
+            // Create single instances
+            this.snapshotSupport = new SnapshotGeneratingValidationSupport(fhirContext);
+            this.terminologySupport = new InMemoryTerminologyServerValidationSupport(fhirContext);
+            this.defaultSupport = new DefaultProfileValidationSupport(fhirContext);
+
+            // prePopulatedSupport FIRST for custom profile precedence
+            this.supportChain = new ValidationSupportChain(
+                    prePopulatedSupport,        // CUSTOM profiles FIRST
+                    terminologySupport,         // Terminology validation
+                    defaultSupport,             // Base FHIR definitions
+                    snapshotSupport             // Snapshot generation
+            );
+
+            initialized.set(true);
+            logger.info("ValidationSupportFactory initialized successfully");
+        } finally {
+            rwLock.writeLock().unlock();
+        }
     }
 
     /**
-     * Create support chain - maintained for backward compatibility
-     * Delegates to the initialized chain
+     * Get the support chain
+     * Thread-safe: read lock ensures consistent state
      */
     public ValidationSupportChain createSupportChain() {
-        if (supportChain == null) {
-            logger.warn("Support chain not initialized, initializing now");
+        if (!initialized.get()) {
             init();
         }
-        return supportChain;
+
+        rwLock.readLock().lock();
+        try {
+            return supportChain;
+        } finally {
+            rwLock.readLock().unlock();
+        }
     }
 
     /**
-     * Create snapshot support - maintained for backward compatibility
-     * Returns the single shared instance
+     * Get the snapshot support
+     * Thread-safe: read lock ensures consistent state
      */
     public SnapshotGeneratingValidationSupport createSnapshotSupport() {
-        if (snapshotSupport == null) {
+        if (!initialized.get()) {
             init();
         }
-        return snapshotSupport;
+
+        rwLock.readLock().lock();
+        try {
+            return snapshotSupport;
+        } finally {
+            rwLock.readLock().unlock();
+        }
     }
 
     /**
-     * Get the support chain (initialized once)
+     * Get the support chain (same as createSupportChain)
      */
     public ValidationSupportChain getSupportChain() {
-        if (supportChain == null) {
-            logger.warn("Support chain not initialized, initializing now");
-            init();
-        }
-        return supportChain;
+        return createSupportChain();
     }
 
     /**
-     * Get the snapshot support (single instance)
+     * Get the snapshot support (same as createSnapshotSupport)
      */
     public SnapshotGeneratingValidationSupport getSnapshotSupport() {
-        if (snapshotSupport == null) {
-            init();
-        }
-        return snapshotSupport;
+        return createSnapshotSupport();
     }
 
     /**
-     * Rebuild the support chain if needed (e.g., after adding new resources)
+     * Rebuild the support chain
+     * FIXED: Thread-safe with write lock
      */
     public void rebuildSupportChain() {
-        logger.info("Rebuilding support chain");
-        init();
+        rwLock.writeLock().lock();
+        try {
+            logger.info("Rebuilding support chain");
+
+            // Reset initialized flag
+            initialized.set(false);
+
+            // Re-initialize
+            init();
+
+            logger.info("Support chain rebuilt successfully");
+        } finally {
+            rwLock.writeLock().unlock();
+        }
+    }
+
+    public boolean isInitialized() {
+        return initialized.get();
     }
 }
