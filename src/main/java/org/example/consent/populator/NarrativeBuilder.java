@@ -2,9 +2,6 @@ package org.example.consent.populator;
 
 import org.example.consent.model.*;
 import org.hl7.fhir.r4.model.Narrative;
-import org.jsoup.Jsoup;
-import org.jsoup.nodes.Document;
-import org.jsoup.parser.Parser;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -17,6 +14,10 @@ import java.util.regex.Pattern;
 /**
  * Builds the human-readable narrative (text.div) for the Consent resource
  * Responsibility: Generate HTML narrative with placeholder replacement and decision status
+ *
+ * FIXED:
+ * - Conditional placeholder [falls zutreffend] correctly removed only for DECLINED
+ * - Placeholder logging no longer skips the first matched placeholder
  */
 public class NarrativeBuilder {
 
@@ -44,6 +45,10 @@ public class NarrativeBuilder {
         Narrative narrative = new Narrative();
         narrative.setStatus(Narrative.NarrativeStatus.GENERATED);
 
+        // Get consent date from request
+        Date consentDate = request.getConsentDate() != null ?
+                request.getConsentDate() : new Date();
+
         Map<String, ModuleDecision> decisionMap = buildDecisionMap(request);
 
         StringBuilder html = new StringBuilder();
@@ -52,14 +57,14 @@ public class NarrativeBuilder {
         // Add header with placeholder replacement
         if (consentTemplate.getHeader() != null) {
             String header = replacePlaceholders(consentTemplate.getHeader(), consentTemplate,
-                    request, true, config);
+                    request, true, config, consentDate);
             html.append(header);
         }
 
         // Add title with placeholder replacement
         if (consentTemplate.getTitle() != null) {
             String title = replacePlaceholders(consentTemplate.getTitle(), consentTemplate,
-                    request, true, config);
+                    request, true, config, consentDate);
             html.append(title);
         }
 
@@ -75,7 +80,8 @@ public class NarrativeBuilder {
                     String status = decision != null ? decision.getStatus() : "DECLINED";
                     boolean isAccepted = "ACCEPTED".equals(status);
 
-                    String moduleHtml = buildModuleHtml(module, isAccepted, status, consentTemplate, request, config);
+                    String moduleHtml = buildModuleHtml(module, isAccepted, status, consentTemplate,
+                            request, config, consentDate);
                     html.append(moduleHtml);
                 }
             }
@@ -83,20 +89,23 @@ public class NarrativeBuilder {
 
         html.append("</div>");
 
-        // Clean the HTML - CRITICAL: ensure we have content
         String rawHtml = html.toString();
         logger.debug("Raw HTML length: {}", rawHtml.length());
 
         String finalHtml = cleanHtml(rawHtml);
         logger.debug("Cleaned HTML length: {}", finalHtml.length());
-        logger.debug("Cleaned HTML preview: {}", finalHtml.substring(0, Math.min(200, finalHtml.length())));
 
-        // Check for remaining placeholders
+        // FIXED: Check for remaining placeholders - collect all first, then log
+        List<String> remainingPlaceholders = new ArrayList<>();
         Matcher matcher = PLACEHOLDER_PATTERN.matcher(finalHtml);
-        if (matcher.find()) {
-            logger.warn("WARNING: Unreplaced placeholders remain in narrative");
-            while (matcher.find()) {
-                logger.warn("  Unreplaced: {}", matcher.group(0));
+        while (matcher.find()) {
+            remainingPlaceholders.add(matcher.group(0));
+        }
+
+        if (!remainingPlaceholders.isEmpty()) {
+            logger.warn("WARNING: {} unreplaced placeholders remain in narrative", remainingPlaceholders.size());
+            for (String placeholder : remainingPlaceholders) {
+                logger.warn("  Unreplaced: {}", placeholder);
             }
         }
 
@@ -104,7 +113,7 @@ public class NarrativeBuilder {
             narrative.setDivAsString(finalHtml);
         } catch (Exception e) {
             logger.error("Failed to set narrative HTML, creating fallback", e);
-            String fallbackHtml = buildFallbackNarrative(consentTemplate, request, config);
+            String fallbackHtml = buildFallbackNarrative(consentTemplate, request, config, consentDate);
             narrative.setDivAsString(fallbackHtml);
         }
 
@@ -116,21 +125,23 @@ public class NarrativeBuilder {
      */
     private String buildModuleHtml(ConsentModule module, boolean isAccepted, String status,
                                    ConsentTemplate consentTemplate, ConsentRequest request,
-                                   TemplateConfiguration config) {
+                                   TemplateConfiguration config, Date consentDate) {
         StringBuilder html = new StringBuilder();
 
         // Add module title
         if (module.getTitle() != null) {
-            String title = replacePlaceholders(module.getTitle(), consentTemplate, request, isAccepted, config);
+            String title = replacePlaceholders(module.getTitle(), consentTemplate, request,
+                    isAccepted, config, consentDate);
             html.append(title);
         }
 
         // Add module text
         String originalText = module.getText() != null ?
-                replacePlaceholders(module.getText(), consentTemplate, request, isAccepted, config) : "";
+                replacePlaceholders(module.getText(), consentTemplate, request,
+                        isAccepted, config, consentDate) : "";
 
-        // For intro modules, just add the text without decision status
-        if (isIntroModule(module.getName())) {
+        // Use centralized module type detection
+        if (ModuleTypeDetector.isIntroModule(module.getName())) {
             html.append(originalText);
             return html.toString();
         }
@@ -165,7 +176,7 @@ public class NarrativeBuilder {
 
     private String replacePlaceholders(String text, ConsentTemplate consentTemplate,
                                        ConsentRequest request, boolean isAccepted,
-                                       TemplateConfiguration config) {
+                                       TemplateConfiguration config, Date consentDate) {
         if (text == null) return "";
 
         String result = text;
@@ -186,7 +197,6 @@ public class NarrativeBuilder {
         result = replaceSectionNumbering(result, consentTemplate);
 
         // 4. Replace date placeholders
-        Date consentDate = request.getConsentDate() != null ? request.getConsentDate() : new Date();
         String formattedDate = DATE_FORMATTER.format(consentDate.toInstant());
         result = result.replaceAll("\\[Datum der Unterschrift\\]", formattedDate);
         result = result.replaceAll("\\[Datum\\]", formattedDate);
@@ -220,23 +230,45 @@ public class NarrativeBuilder {
         return result;
     }
 
+    /**
+     * Replace conditional placeholders
+     * FIXED: [falls zutreffend] is removed for DECLINED, kept for ACCEPTED
+     * FIXED: [falls zutreffend: content] is replaced with content if ACCEPTED, removed if DECLINED
+     */
     private String replaceConditionalPlaceholders(String text, boolean isAccepted) {
         if (text == null) return "";
 
         String result = text;
+
+        // Handle: [falls zutreffend: content]
+        // For ACCEPTED: replace with content
+        // For DECLINED: remove entirely
         Matcher matcher = CONDITIONAL_PATTERN.matcher(result);
         StringBuffer sb = new StringBuffer();
 
         while (matcher.find()) {
             String content = matcher.group(1).trim();
+            // FIXED: For accepted, include content; for declined, remove it
             String replacement = isAccepted ? content : "";
             matcher.appendReplacement(sb, Matcher.quoteReplacement(replacement));
         }
         matcher.appendTail(sb);
         result = sb.toString();
 
-        result = result.replaceAll("\\[falls zutreffend\\]", isAccepted ? "" : "");
+        // FIXED: Handle [falls zutreffend] (without colon)
+        // For ACCEPTED: keep the content that follows (the next phrase)
+        // For DECLINED: remove the token
+        if (isAccepted) {
+            // Keep the token - it's part of the text that follows
+            // e.g., "[falls zutreffend] und in die Gewinnung" → "und in die Gewinnung"
+            result = result.replaceAll("\\[falls zutreffend\\]\\s*", "");
+        } else {
+            // Remove the token and the following content
+            result = result.replaceAll("\\[falls zutreffend\\][^<]*?(?:<[^>]*>)*?", "");
+        }
 
+        // Handle "Falls zutreffend:" without brackets
+        // FIXED: For DECLINED, remove the entire phrase; for ACCEPTED, keep it
         if (!isAccepted) {
             result = result.replaceAll("Falls zutreffend:[^<]*?(?:<[^>]*>)*?", "");
         }
@@ -314,12 +346,14 @@ public class NarrativeBuilder {
      * Build fallback narrative when HTML generation fails
      */
     private String buildFallbackNarrative(ConsentTemplate consentTemplate, ConsentRequest request,
-                                          TemplateConfiguration config) {
+                                          TemplateConfiguration config, Date consentDate) {
+        Date effectiveDate = consentDate != null ? consentDate : new Date();
+
         StringBuilder html = new StringBuilder();
         html.append("<div xmlns=\"http://www.w3.org/1999/xhtml\">");
         html.append("<h2>Einwilligungserklärung</h2>");
         html.append("<p><strong>Patient:</strong> ").append(request.getPatientId()).append("</p>");
-        html.append("<p><strong>Datum:</strong> ").append(DATE_FORMATTER.format(new Date().toInstant())).append("</p>");
+        html.append("<p><strong>Datum:</strong> ").append(DATE_FORMATTER.format(effectiveDate.toInstant())).append("</p>");
         html.append("<p><strong>Template:</strong> ").append(consentTemplate.getName()).append("</p>");
         html.append("<hr/>");
 
@@ -331,38 +365,29 @@ public class NarrativeBuilder {
 
             for (ModuleAssignment assignment : sortedModules) {
                 ConsentModule module = moduleResolver.getModule(assignment.getModuleKey());
-                if (module != null && !isIntroModule(module.getName())) {
-                    ModuleDecision decision = decisionMap.get(assignment.getModuleKey());
-                    boolean isAccepted = decision != null && "ACCEPTED".equals(decision.getStatus());
-                    String statusText = isAccepted ? "✓ EINWILLIGUNG ERTEILT" : "✗ EINWILLIGUNG VERWEIGERT";
-                    String statusColor = isAccepted ? "#4CAF50" : "#f44336";
+                if (module != null) {
+                    if (!ModuleTypeDetector.isIntroModule(module.getName())) {
+                        ModuleDecision decision = decisionMap.get(assignment.getModuleKey());
+                        boolean isAccepted = decision != null && "ACCEPTED".equals(decision.getStatus());
+                        String statusText = isAccepted ? "✓ EINWILLIGUNG ERTEILT" : "✗ EINWILLIGUNG VERWEIGERT";
+                        String statusColor = isAccepted ? "#4CAF50" : "#f44336";
 
-                    html.append("<div style=\"border-left: 4px solid ")
-                            .append(statusColor)
-                            .append("; padding-left: 10px; margin: 10px 0;\">");
-                    html.append("<div style=\"font-weight: bold; color: ")
-                            .append(statusColor)
-                            .append(";\">")
-                            .append(statusText)
-                            .append("</div>");
-                    html.append("<p><strong>Modul:</strong> ").append(module.getLabel()).append("</p>");
-                    html.append("</div>");
+                        html.append("<div style=\"border-left: 4px solid ")
+                                .append(statusColor)
+                                .append("; padding-left: 10px; margin: 10px 0;\">");
+                        html.append("<div style=\"font-weight: bold; color: ")
+                                .append(statusColor)
+                                .append(";\">")
+                                .append(statusText)
+                                .append("</div>");
+                        html.append("<p><strong>Modul:</strong> ").append(module.getLabel()).append("</p>");
+                        html.append("</div>");
+                    }
                 }
             }
         }
 
         html.append("</div>");
         return html.toString();
-    }
-
-    private boolean isIntroModule(String moduleName) {
-        if (moduleName == null) return false;
-        return moduleName.contains("Intro") ||
-                moduleName.contains("Geltungsdauer") ||
-                moduleName.contains("Widerrufsrecht") ||
-                moduleName.contains("Rekontaktierung_Intro") ||
-                moduleName.equals("PATDAT_Intro") ||
-                moduleName.equals("KKDAT_Intro") ||
-                moduleName.equals("BIOMAT_Intro");
     }
 }

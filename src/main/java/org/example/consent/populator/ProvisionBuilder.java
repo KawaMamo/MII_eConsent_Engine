@@ -11,6 +11,8 @@ import java.util.*;
 /**
  * Builds the provisions (structured consent decisions) for the Consent resource
  * Responsibility: Build main and nested provisions with proper permit/deny types
+ *
+ * FIXED: Empty provisions (no codes) are skipped to prevent invalid FHIR
  */
 public class ProvisionBuilder {
 
@@ -29,7 +31,11 @@ public class ProvisionBuilder {
      */
     public Consent.ProvisionComponent buildProvisions(ConsentTemplate consentTemplate,
                                                       ConsentRequest request,
-                                                      TemplateConfiguration config) {
+                                                      TemplateConfiguration config,
+                                                      Date consentDate) {
+        Date startDate = consentDate != null ? consentDate : new Date();
+        logger.info("Building provisions with start date: {}", startDate);
+
         Consent.ProvisionComponent mainProvision = new Consent.ProvisionComponent();
 
         String provisionType = getMainProvisionType(request);
@@ -38,7 +44,6 @@ public class ProvisionBuilder {
         mainProvision.setType(type);
         logger.info("Main provision type: {}", type);
 
-        Date startDate = new Date();
         Period mainPeriod = periodCalculator.createPeriod(startDate, config.validityPeriod);
         mainProvision.setPeriod(mainPeriod);
         logger.info("Main provision period: {} to {}", mainPeriod.getStart(), mainPeriod.getEnd());
@@ -52,7 +57,7 @@ public class ProvisionBuilder {
             Map<String, ModuleDecision> decisionMap = buildDecisionMap(request);
 
             for (ModuleAssignment assignment : sortedModules) {
-                if (isIntroModuleKey(assignment.getModuleKey())) {
+                if (ModuleTypeDetector.isIntroModule(assignment.getModuleKey())) {
                     continue;
                 }
 
@@ -62,12 +67,17 @@ public class ProvisionBuilder {
                     Consent.ProvisionComponent nestedProvision = buildNestedProvision(
                             module, assignment, consentTemplate, decision, startDate, config);
 
-                    if (nestedProvision != null) {
+                    // FIXED: Only add provision if it has codes
+                    if (nestedProvision != null && nestedProvision.getCode() != null && !nestedProvision.getCode().isEmpty()) {
                         nestedProvisions.add(nestedProvision);
                         String status = decision != null ? decision.getStatus() : "DECLINED";
                         int codeCount = nestedProvision.getCode() != null ? nestedProvision.getCode().size() : 0;
                         logger.debug("Added nested provision for module: {} (status: {}, codes: {})",
                                 module.getName(), status, codeCount);
+                    } else if (nestedProvision != null) {
+                        // Log warning but don't add empty provision
+                        logger.warn("Skipping empty nested provision for module: {} - no policy codes found",
+                                module.getName());
                     }
                 }
             }
@@ -76,7 +86,7 @@ public class ProvisionBuilder {
                 mainProvision.addProvision(nested);
             }
 
-            logger.info("Built {} nested provisions", nestedProvisions.size());
+            logger.info("Built {} nested provisions (skipped empty ones)", nestedProvisions.size());
         }
 
         return mainProvision;
@@ -115,6 +125,7 @@ public class ProvisionBuilder {
             policySystem = "urn:oid:2.16.840.1.113883.3.1937.777.24.5.3";
         }
 
+        boolean hasCodes = false;
         List<PolicyAssignment> policyAssignments = module.getPoliciesAssignedConsentPolicy();
         if (policyAssignments != null) {
             for (PolicyAssignment policyAssignment : policyAssignments) {
@@ -122,21 +133,28 @@ public class ProvisionBuilder {
                 ConsentPolicy policy = moduleResolver.getPolicy(policyKey);
                 if (policy != null) {
                     String fhirCode = policy.getFhirPolicyCode();
-                    if (fhirCode != null) {
+                    if (fhirCode != null && !fhirCode.isEmpty()) {
                         org.hl7.fhir.r4.model.CodeableConcept code = new org.hl7.fhir.r4.model.CodeableConcept();
                         code.addCoding()
                                 .setSystem(policySystem)
                                 .setCode(fhirCode)
                                 .setDisplay(policy.getLabel());
                         provision.addCode(code);
+                        hasCodes = true;
+                        logger.debug("Added policy code: {} - {}", fhirCode, policy.getLabel());
                     } else {
-                        logger.warn("Policy {} has no FHIR code, but provision type {} preserves decision",
-                                policyKey, type);
+                        logger.warn("Policy {} has no FHIR code", policyKey);
                     }
                 } else {
                     logger.warn("Policy not found: {}", policyKey);
                 }
             }
+        }
+
+        // If no codes were added, return null so the provision is skipped
+        if (!hasCodes) {
+            logger.warn("Module {} has no valid policy codes - provision will be skipped", module.getName());
+            return null;
         }
 
         return provision;
@@ -154,13 +172,5 @@ public class ProvisionBuilder {
 
     private String getMainProvisionType(ConsentRequest request) {
         return request.getMainProvisionType() != null ? request.getMainProvisionType() : "deny";
-    }
-
-    private boolean isIntroModuleKey(String moduleKey) {
-        if (moduleKey == null) return false;
-        return moduleKey.contains("Intro") ||
-                moduleKey.contains("Geltungsdauer") ||
-                moduleKey.contains("Widerrufsrecht") ||
-                moduleKey.contains("Rekontaktierung_Intro");
     }
 }

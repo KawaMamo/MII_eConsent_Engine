@@ -11,6 +11,8 @@ import java.util.regex.Pattern;
 /**
  * Extracts configuration from templates and profiles
  * Responsibility: Extract all configuration values from template and profile
+ *
+ * FIXED: Supports both template-level and domain-level fhirForceProfileConsent
  */
 public class ConfigurationExtractor {
 
@@ -36,6 +38,7 @@ public class ConfigurationExtractor {
 
     /**
      * Extract all configuration from template and profile
+     * FIXED: Checks both template and domain externProperties for profile URL
      */
     public TemplateConfiguration extractConfiguration(ConsentTemplate consentTemplate, StructureDefinition miiProfile) {
         LoincCategory loinc = extractLoincCategory(miiProfile);
@@ -43,19 +46,27 @@ public class ConfigurationExtractor {
         String validityPeriod = extractValidityPeriod(consentTemplate);
         Scope scope = extractScope(consentTemplate);
 
-        String profileUrl = consentTemplate.getFhirProfileUrl();
+        // FIXED: Try template externProperties first, then fallback to domain
+        String profileUrl = extractProfileUrl(consentTemplate);
         if (profileUrl == null || profileUrl.isEmpty()) {
-            throw new IllegalStateException("Template missing fhirForceProfileConsent in externProperties");
+            throw new IllegalStateException(
+                    "Template missing fhirForceProfileConsent in externProperties. " +
+                            "Please add fhirForceProfileConsent=... to the template's externProperties or domain's externProperties."
+            );
         }
 
         String consentCategory = consentTemplate.getFhirConsentCategory();
         if (consentCategory == null || consentCategory.isEmpty()) {
-            throw new IllegalStateException("Template missing fhirConsentCategory in externProperties");
+            throw new IllegalStateException(
+                    "Template missing fhirConsentCategory in externProperties"
+            );
         }
 
         String policyValueSet = consentTemplate.getFhirPolicyValueSet();
         if (policyValueSet == null || policyValueSet.isEmpty()) {
-            throw new IllegalStateException("Template missing fhirPolicyValueSet in externProperties");
+            throw new IllegalStateException(
+                    "Template missing fhirPolicyValueSet in externProperties"
+            );
         }
 
         return new TemplateConfiguration(
@@ -67,6 +78,44 @@ public class ConfigurationExtractor {
                 consentTemplate
         );
     }
+
+    /**
+     * Extract profile URL from template or domain externProperties
+     * FIXED: Checks both levels
+     */
+    private String extractProfileUrl(ConsentTemplate consentTemplate) {
+        // First try template externProperties
+        if (consentTemplate.getExternProperties() != null) {
+            String[] props = consentTemplate.getExternProperties().split(";");
+            for (String prop : props) {
+                if (prop.startsWith("fhirForceProfileConsent=")) {
+                    return prop.substring("fhirForceProfileConsent=".length());
+                }
+            }
+        }
+
+        // Fallback: Try to get from domain externProperties (for older templates like 1.6.d)
+        if (consentTemplate.getDomainName() != null && consentTemplate.getDomainName().equals("MII")) {
+            // The domain externProperties is in the template object
+            // We need to check if the template has domain externProperties
+            // For 1.6.d, the domain externProperties has the profile URL
+            String domainExternProperties = consentTemplate.getDomainExternProperties();
+            if (domainExternProperties != null && !domainExternProperties.isEmpty()) {
+                String[] props = domainExternProperties.split(";");
+                for (String prop : props) {
+                    if (prop.startsWith("fhirForceProfileConsent=")) {
+                        return prop.substring("fhirForceProfileConsent=".length());
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
+    // ==========================================
+    // Other extraction methods
+    // ==========================================
 
     private LoincCategory extractLoincCategory(StructureDefinition miiProfile) {
         if (miiProfile == null) {
@@ -218,7 +267,10 @@ public class ConfigurationExtractor {
         return new Scope(system, code, display);
     }
 
+    // ==========================================
     // Inner DTO classes
+    // ==========================================
+
     public static class LoincCategory {
         public final String code, system, display;
         public LoincCategory(String code, String system, String display) {

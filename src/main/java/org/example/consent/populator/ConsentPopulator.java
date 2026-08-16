@@ -44,24 +44,36 @@ public class ConsentPopulator {
         this.periodCalculator = new PeriodCalculator();
         this.narrativeBuilder = new NarrativeBuilder(moduleResolver);
         this.provisionBuilder = new ProvisionBuilder(moduleResolver, periodCalculator);
+
+        logger.info("ConsentPopulator initialized with {} policies, {} modules, {} templates",
+                policyMap.size(), moduleMap.size(), templateMap.size());
     }
 
     /**
      * Populate a Consent resource from the template and user decisions
      */
     public Consent populateConsent(ConsentRequest request, StructureDefinition miiProfile) {
+        // Validate request BEFORE accessing templateMap
+        validateRequest(request);
+
         logger.info("Populating consent for patient: {}, template: {}",
                 request.getPatientId(), request.getTemplateKey());
 
         ConsentTemplate consentTemplate = templateMap.get(request.getTemplateKey());
         if (consentTemplate == null) {
-            throw new IllegalArgumentException("Template not found: " + request.getTemplateKey());
+            throw new IllegalArgumentException(
+                    "Template not found: " + request.getTemplateKey() +
+                            ". Available templates: " + templateMap.keySet()
+            );
         }
 
-        validateRequest(request);
-
-        // Extract configuration
+        // Extract configuration from template and profile
         TemplateConfiguration config = configExtractor.extractConfiguration(consentTemplate, miiProfile);
+
+        // Get consent date from request (or default to now)
+        Date consentDate = request.getConsentDate() != null ?
+                request.getConsentDate() : new Date();
+        logger.info("Using consent date: {}", consentDate);
 
         Consent consent = new Consent();
 
@@ -90,7 +102,6 @@ public class ConsentPopulator {
         logger.info("Set patient: {}", request.getPatientId());
 
         // 7. DateTime
-        Date consentDate = request.getConsentDate() != null ? request.getConsentDate() : new Date();
         consent.setDateTime(consentDate);
         logger.info("Set consent date: {}", consentDate);
 
@@ -115,12 +126,12 @@ public class ConsentPopulator {
         // 11. Policy Rule
         consent.setPolicyRule(buildPolicyRule(config));
 
-        // 12. Provisions
+        // 12. Provisions - Pass consent date so period.start matches consent.dateTime
         Consent.ProvisionComponent mainProvision = provisionBuilder.buildProvisions(
-                consentTemplate, request, config);
+                consentTemplate, request, config, consentDate);
         consent.setProvision(mainProvision);
 
-        // 13. Signature
+        // 13. Signature (future)
         if (request.getSignature() != null) {
             logger.info("Signature received for later processing");
         }
@@ -240,9 +251,16 @@ public class ConsentPopulator {
     }
 
     public List<ModuleInfo> getModulesForTemplate(String templateKey) {
+        if (templateKey == null || templateKey.isEmpty()) {
+            throw new IllegalArgumentException("Template key cannot be null or empty");
+        }
+
         ConsentTemplate consentTemplate = templateMap.get(templateKey);
         if (consentTemplate == null) {
-            throw new IllegalArgumentException("Template not found: " + templateKey);
+            throw new IllegalArgumentException(
+                    "Template not found: " + templateKey +
+                            ". Available templates: " + templateMap.keySet()
+            );
         }
 
         List<ModuleInfo> moduleInfos = new ArrayList<>();
@@ -310,6 +328,12 @@ public class ConsentPopulator {
     }
 
     private void validateRequest(ConsentRequest request) {
+        if (request == null) {
+            throw new IllegalArgumentException("Consent request cannot be null");
+        }
+        if (request.getTemplateKey() == null || request.getTemplateKey().isEmpty()) {
+            throw new IllegalArgumentException("Template key is required");
+        }
         if (request.getPatientId() == null || request.getPatientId().isEmpty()) {
             throw new IllegalArgumentException("Patient ID is required");
         }

@@ -5,10 +5,7 @@ import ca.uhn.fhir.parser.IParser;
 import ca.uhn.fhir.validation.ValidationResult;
 import org.example.consent.loader.ConsentTemplateLoader;
 import org.example.consent.model.ExchangeFormatDefinition;
-import org.example.consent.populator.ConsentPopulator;
-import org.example.consent.populator.ConsentRequest;
-import org.example.consent.populator.ModuleDecision;
-import org.example.consent.populator.ModuleInfo;
+import org.example.consent.populator.*;
 import org.example.tools.FhirResourceLoader;
 import org.example.tools.JsonSerializationService;
 import org.example.validation.FhirValidatorService;
@@ -44,12 +41,11 @@ public class Main {
 
         try {
             // ==========================================
-            // ADMIN PHASE: Load Resources
+            // ADMIN: Load Resources
             // ==========================================
             System.out.println("=== FHIR Consent Management System ===\n");
             System.out.println("--- ADMIN: Loading Resources ---");
 
-            // Load FHIR profiles and terminology resources
             FhirResourceLoader resourceLoader = new FhirResourceLoader(fhirContext, jsonParser);
 
             StructureDefinition germanConsentBase = resourceLoader.loadStructureDefinition(Constants.GERMAN_CONSENT_PROFILE);
@@ -64,12 +60,11 @@ public class Main {
             ConsentTemplateLoader templateLoader = new ConsentTemplateLoader();
             ExchangeFormatDefinition template = templateLoader.loadFromFile(Constants.GICS_CONSENT_TEMPLATE);
 
-            // Extract template key with null safety
             String templateKey = extractTemplateKey(template);
             System.out.println("Active Template: " + templateKey);
 
             // ==========================================
-            // ADMIN: Setup Validation Support
+            // ADMIN: Setup Validation
             // ==========================================
             System.out.println("\n--- ADMIN: Setting up validation ---");
 
@@ -81,7 +76,6 @@ public class Main {
             ValidationSupportChain supportChain = supportFactory.createSupportChain();
             SnapshotGeneratingValidationSupport snapshotSupport = supportFactory.createSnapshotSupport();
 
-            // Generate snapshots
             SnapshotGeneratorService snapshotService = new SnapshotGeneratorService(
                     supportChain,
                     snapshotSupport
@@ -102,10 +96,11 @@ public class Main {
             System.out.println("Profile snapshots generated successfully");
 
             // ==========================================
-            // USER PHASE: Show available modules
+            // USER: Show Modules
             // ==========================================
             System.out.println("\n--- USER: Available Modules ---");
 
+            // FIXED: Pass miiSnapshot to constructor (even though not used until populateConsent)
             ConsentPopulator populator = new ConsentPopulator(template, miiSnapshot);
             List<ModuleInfo> modules = populator.getModulesForTemplate(templateKey);
 
@@ -137,6 +132,8 @@ public class Main {
             // SYSTEM: Generate Consent
             // ==========================================
             System.out.println("\n--- SYSTEM: Generating Consent ---");
+
+            // FIXED: Pass miiSnapshot to populateConsent (where it's actually used)
             Consent consent = populator.populateConsent(request, miiSnapshot);
 
             // ==========================================
@@ -148,7 +145,7 @@ public class Main {
             validatorService.printValidationResults(validationResult);
 
             // ==========================================
-            // SYSTEM: Serialize Output
+            // SYSTEM: Output JSON
             // ==========================================
             JsonSerializationService serializationService = new JsonSerializationService(jsonParser);
             String jsonPayload = serializationService.serialize(consent);
@@ -164,9 +161,6 @@ public class Main {
         }
     }
 
-    /**
-     * Extract template key with null safety
-     */
     private static String extractTemplateKey(ExchangeFormatDefinition template) {
         if (template == null) {
             throw new IllegalArgumentException("Template is null");
@@ -180,9 +174,6 @@ public class Main {
                 template.getTemplatesConsentTemplate().get(0).getVersion();
     }
 
-    /**
-     * Create a consent request with sample decisions
-     */
     private static ConsentRequest createConsentRequest(String templateKey, List<ModuleInfo> modules) {
         ConsentRequest request = new ConsentRequest();
         request.setTemplateKey(templateKey);
@@ -190,15 +181,15 @@ public class Main {
         request.setOrganizationId("Organization/hospital-123");
         request.setConsentDate(new Date());
         request.setSourceReference("QuestionnaireResponse/consent-form-2024-01-01");
+        request.setInstitutionName("Universitätsklinikum Hamburg");
+        request.setPatientName("Max Mustermann");
 
-        // User decisions for each module
         for (ModuleInfo module : modules) {
             ModuleDecision decision = new ModuleDecision();
             decision.setModuleKey(module.getModuleKey());
             decision.setModuleName(module.getModuleName());
 
-            // Accept modules with order number < 3 (0, 1, 2)
-            // This is just a sample - in real use, this comes from the user
+            // Accept first 3 modules (0, 1, 2), decline the rest
             if (module.getOrderNumber() < 3) {
                 decision.setStatus("ACCEPTED");
                 decision.setProvisionType("permit");
@@ -212,9 +203,6 @@ public class Main {
         return request;
     }
 
-    /**
-     * Print summary of the consent generation
-     */
     private static void printSummary(StructureDefinition miiSnapshot, ExchangeFormatDefinition template,
                                      ConsentRequest request, ValidationResult validationResult) {
         System.out.println("\n=== Summary ===");
