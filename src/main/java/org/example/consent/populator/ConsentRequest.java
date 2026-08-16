@@ -7,6 +7,7 @@ import java.util.*;
  * All fields except patientId and organizationId are optional
  *
  * FIXED: Added null safety for all getters and decision lookups
+ * FIXED: Added helper methods for status checking
  */
 public class ConsentRequest {
 
@@ -134,21 +135,15 @@ public class ConsentRequest {
 
     /**
      * Get decision for a specific module with proper null safety
-     * FIXED: Null checks on both moduleKey and decision.getModuleKey()
      */
     public ModuleDecision getDecisionForModule(String moduleKey) {
-        // Guard against null moduleKey
         if (moduleKey == null || moduleKey.isEmpty()) {
             return null;
         }
-
-        // Guard against null moduleDecisions list
         if (moduleDecisions == null || moduleDecisions.isEmpty()) {
             return null;
         }
-
         for (ModuleDecision decision : moduleDecisions) {
-            // FIXED: Null check on decision and decision.getModuleKey()
             if (decision != null) {
                 String decisionKey = decision.getModuleKey();
                 if (decisionKey != null && decisionKey.equals(moduleKey)) {
@@ -160,17 +155,24 @@ public class ConsentRequest {
     }
 
     /**
-     * Get all decisions for modules that have a specific status
+     * Get all decisions for modules that have a specific status (case-insensitive)
+     * FIXED: Case-insensitive status matching
      */
     public List<ModuleDecision> getDecisionsByStatus(String status) {
         if (status == null || moduleDecisions == null || moduleDecisions.isEmpty()) {
             return Collections.emptyList();
         }
 
+        String upperStatus = status.toUpperCase();
         List<ModuleDecision> result = new ArrayList<>();
         for (ModuleDecision decision : moduleDecisions) {
-            if (decision != null && status.equals(decision.getStatus())) {
-                result.add(decision);
+            if (decision != null && decision.getStatus() != null) {
+                String decisionStatus = decision.getStatus().toUpperCase();
+                if (decisionStatus.equals(upperStatus) ||
+                        (upperStatus.equals("ACCEPTED") && decisionStatus.equals("PERMIT")) ||
+                        (upperStatus.equals("DECLINED") && decisionStatus.equals("DENY"))) {
+                    result.add(decision);
+                }
             }
         }
         return result;
@@ -191,19 +193,27 @@ public class ConsentRequest {
     }
 
     /**
-     * Check if a module is accepted
+     * Check if a module is accepted (case-insensitive)
      */
     public boolean isModuleAccepted(String moduleKey) {
         ModuleDecision decision = getDecisionForModule(moduleKey);
-        return decision != null && "ACCEPTED".equals(decision.getStatus());
+        if (decision == null) {
+            return false;
+        }
+        String status = decision.getStatus();
+        return status != null && ("ACCEPTED".equalsIgnoreCase(status) || "PERMIT".equalsIgnoreCase(status));
     }
 
     /**
-     * Check if a module is declined
+     * Check if a module is declined (case-insensitive)
      */
     public boolean isModuleDeclined(String moduleKey) {
         ModuleDecision decision = getDecisionForModule(moduleKey);
-        return decision != null && "DECLINED".equals(decision.getStatus());
+        if (decision == null) {
+            return false;
+        }
+        String status = decision.getStatus();
+        return status != null && ("DECLINED".equalsIgnoreCase(status) || "DENY".equalsIgnoreCase(status));
     }
 
     /**

@@ -6,17 +6,24 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.*;
+import java.util.regex.Pattern;
 
 /**
  * Service that populates FHIR Consent resources from ExchangeFormatDefinition templates
  * Orchestrates the work of specialized builders and extractors
  * STATELESS DESIGN: Thread-safe, can be reused safely across multiple requests
  *
- * FIXED: Removed unused miiProfile constructor parameter
+ * FIXED: Untrimmed externProperties tokens - now using Pattern.split with trim
+ * FIXED: Loose status matching - using equalsIgnoreCase
+ * FIXED: Null safety for status checks
+ * FIXED: Incomplete scope initialization with null checks
  */
 public class ConsentPopulator {
 
     private static final Logger logger = LoggerFactory.getLogger(ConsentPopulator.class);
+
+    // FIXED: Pattern for splitting externProperties with optional whitespace
+    private static final Pattern EXTERN_PROPERTIES_SPLIT = Pattern.compile(";\\s*");
 
     // Only immutable, shared dependencies
     private final ExchangeFormatDefinition template;
@@ -33,7 +40,6 @@ public class ConsentPopulator {
 
     /**
      * Constructor - initializes the populator with template data
-     * FIXED: Removed unused miiProfile parameter
      *
      * @param template The consent template (ExchangeFormatDefinition)
      */
@@ -84,8 +90,7 @@ public class ConsentPopulator {
             );
         }
 
-        // FIXED: Extract configuration from template and profile
-        // The profile is only needed here, not stored in the instance
+        // Extract configuration from template and profile
         TemplateConfiguration config = configExtractor.extractConfiguration(consentTemplate, miiProfile);
 
         // Get consent date from request (or default to now)
@@ -106,8 +111,9 @@ public class ConsentPopulator {
         // 3. Status
         consent.setStatus(Consent.ConsentState.ACTIVE);
 
-        // 4. Scope
-        consent.setScope(buildScope(config));
+        // 4. Scope - FIXED: Null checks applied
+        CodeableConcept scope = buildScope(config);
+        consent.setScope(scope);
 
         // 5. Categories
         List<CodeableConcept> categories = buildCategories(consentTemplate, config);
@@ -154,10 +160,20 @@ public class ConsentPopulator {
             logger.info("Signature received for later processing");
         }
 
+        // FIXED: Null-safe status counting with equalsIgnoreCase
         long acceptedCount = request.getModuleDecisions() != null ?
-                request.getModuleDecisions().stream().filter(d -> "ACCEPTED".equals(d.getStatus())).count() : 0;
+                request.getModuleDecisions().stream()
+                        .filter(d -> d != null && d.getStatus() != null &&
+                                ("ACCEPTED".equalsIgnoreCase(d.getStatus()) ||
+                                        "PERMIT".equalsIgnoreCase(d.getStatus())))
+                        .count() : 0;
+
         long deniedCount = request.getModuleDecisions() != null ?
-                request.getModuleDecisions().stream().filter(d -> "DECLINED".equals(d.getStatus())).count() : 0;
+                request.getModuleDecisions().stream()
+                        .filter(d -> d != null && d.getStatus() != null &&
+                                ("DECLINED".equalsIgnoreCase(d.getStatus()) ||
+                                        "DENY".equalsIgnoreCase(d.getStatus())))
+                        .count() : 0;
 
         logger.info("Consent populated successfully with {} accepted and {} denied modules",
                 acceptedCount, deniedCount);
@@ -169,15 +185,30 @@ public class ConsentPopulator {
     // Helper methods
     // ==========================================
 
+    /**
+     * Build scope CodeableConcept with null safety
+     * FIXED: Null checks on config scope values
+     */
     private CodeableConcept buildScope(TemplateConfiguration config) {
         CodeableConcept scope = new CodeableConcept();
+
+        // FIXED: Null checks to avoid empty FHIR codings
+        String system = config.scopeSystem != null ? config.scopeSystem : "http://terminology.hl7.org/CodeSystem/consentscope";
+        String code = config.scopeCode != null ? config.scopeCode : "research";
+        String display = config.scopeDisplay != null ? config.scopeDisplay : "Research";
+
         scope.addCoding()
-                .setSystem(config.scopeSystem)
-                .setCode(config.scopeCode)
-                .setDisplay(config.scopeDisplay);
+                .setSystem(system)
+                .setCode(code)
+                .setDisplay(display);
+
         return scope;
     }
 
+    /**
+     * Build categories from template and config
+     * FIXED: Uses EXTERN_PROPERTIES_SPLIT for proper trimming
+     */
     private List<CodeableConcept> buildCategories(ConsentTemplate consentTemplate, TemplateConfiguration config) {
         List<CodeableConcept> categories = new ArrayList<>();
 
@@ -195,14 +226,17 @@ public class ConsentPopulator {
         String miiCategorySystem = "https://www.medizininformatik-initiative.de/fhir/modul-consent/CodeSystem/mii-cs-consent-version-modules";
         String miiCategoryDisplay = "MII Broad Consent";
 
+        // FIXED: Use EXTERN_PROPERTIES_SPLIT for proper trimming
         if (consentTemplate.getExternProperties() != null) {
-            String[] props = consentTemplate.getExternProperties().split(";");
+            String[] props = EXTERN_PROPERTIES_SPLIT.split(consentTemplate.getExternProperties());
             for (String prop : props) {
-                if (prop.startsWith("fhirConsentCategorySystem=")) {
-                    miiCategorySystem = prop.substring("fhirConsentCategorySystem=".length());
+                if (prop == null) continue;
+                String trimmedProp = prop.trim();
+                if (trimmedProp.startsWith("fhirConsentCategorySystem=")) {
+                    miiCategorySystem = trimmedProp.substring("fhirConsentCategorySystem=".length()).trim();
                 }
-                if (prop.startsWith("fhirConsentCategoryDisplay=")) {
-                    miiCategoryDisplay = prop.substring("fhirConsentCategoryDisplay=".length());
+                if (trimmedProp.startsWith("fhirConsentCategoryDisplay=")) {
+                    miiCategoryDisplay = trimmedProp.substring("fhirConsentCategoryDisplay=".length()).trim();
                 }
             }
         }
@@ -237,16 +271,23 @@ public class ConsentPopulator {
         return policyRule;
     }
 
+    /**
+     * Extract source reference from template or request
+     * FIXED: Uses EXTERN_PROPERTIES_SPLIT for proper trimming
+     */
     private String extractSourceReference(ConsentTemplate consentTemplate, ConsentRequest request) {
         if (request.getSourceReference() != null && !request.getSourceReference().isEmpty()) {
             return request.getSourceReference();
         }
 
+        // FIXED: Use EXTERN_PROPERTIES_SPLIT for proper trimming
         if (consentTemplate.getExternProperties() != null) {
-            String[] props = consentTemplate.getExternProperties().split(";");
+            String[] props = EXTERN_PROPERTIES_SPLIT.split(consentTemplate.getExternProperties());
             for (String prop : props) {
-                if (prop.startsWith("fhirSourceReference=")) {
-                    return prop.substring("fhirSourceReference=".length());
+                if (prop == null) continue;
+                String trimmedProp = prop.trim();
+                if (trimmedProp.startsWith("fhirSourceReference=")) {
+                    return trimmedProp.substring("fhirSourceReference=".length()).trim();
                 }
             }
         }
@@ -356,6 +397,7 @@ public class ConsentPopulator {
 
     /**
      * Validate that the request has all required fields
+     * FIXED: Added null safety for module decisions
      */
     private void validateRequest(ConsentRequest request) {
         if (request == null) {
@@ -372,6 +414,27 @@ public class ConsentPopulator {
         }
         if (request.getModuleDecisions() == null || request.getModuleDecisions().isEmpty()) {
             throw new IllegalArgumentException("Module decisions are required");
+        }
+
+        // FIXED: Validate each decision has required fields
+        for (ModuleDecision decision : request.getModuleDecisions()) {
+            if (decision == null) {
+                throw new IllegalArgumentException("Module decision cannot be null");
+            }
+            if (decision.getModuleKey() == null || decision.getModuleKey().isEmpty()) {
+                throw new IllegalArgumentException("Module decision must have a module key");
+            }
+            if (decision.getStatus() == null || decision.getStatus().isEmpty()) {
+                throw new IllegalArgumentException("Module decision must have a status");
+            }
+            // FIXED: Validate status values (case-insensitive)
+            String upperStatus = decision.getStatus().toUpperCase();
+            if (!"ACCEPTED".equals(upperStatus) && !"DECLINED".equals(upperStatus) &&
+                    !"PERMIT".equals(upperStatus) && !"DENY".equals(upperStatus)) {
+                throw new IllegalArgumentException(
+                        "Module decision status must be ACCEPTED, DECLINED, PERMIT, or DENY. Got: " + decision.getStatus()
+                );
+            }
         }
     }
 }

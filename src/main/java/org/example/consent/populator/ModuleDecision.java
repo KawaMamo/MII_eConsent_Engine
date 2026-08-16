@@ -5,7 +5,8 @@ import java.util.Objects;
 /**
  * Represents a user's decision for a specific module
  *
- * FIXED: Added null safety and validation
+ * FIXED: Status normalization to uppercase for consistent matching
+ * FIXED: Provision type normalization
  */
 public class ModuleDecision {
 
@@ -42,27 +43,48 @@ public class ModuleDecision {
         return status;
     }
 
+    /**
+     * Set status with normalization to uppercase
+     * FIXED: Normalizes to uppercase for consistent matching
+     */
     public void setStatus(String status) {
         if (status == null) {
             throw new IllegalArgumentException("Status cannot be null");
         }
-        // Validate status
+        // Normalize to uppercase
         String upperStatus = status.toUpperCase();
-        if (!"ACCEPTED".equals(upperStatus) && !"DECLINED".equals(upperStatus)) {
-            throw new IllegalArgumentException("Status must be 'ACCEPTED' or 'DECLINED', got: " + status);
+        // FIXED: Accept both status and provision type values
+        if (!"ACCEPTED".equals(upperStatus) && !"DECLINED".equals(upperStatus) &&
+                !"PERMIT".equals(upperStatus) && !"DENY".equals(upperStatus)) {
+            throw new IllegalArgumentException(
+                    "Status must be ACCEPTED, DECLINED, PERMIT, or DENY. Got: " + status
+            );
         }
-        this.status = upperStatus;
+        // Map PERMIT/DENY to ACCEPTED/DECLINED for consistency
+        if ("PERMIT".equals(upperStatus)) {
+            this.status = "ACCEPTED";
+        } else if ("DENY".equals(upperStatus)) {
+            this.status = "DECLINED";
+        } else {
+            this.status = upperStatus;
+        }
     }
 
     public String getProvisionType() {
         return provisionType != null ? provisionType : "deny";
     }
 
+    /**
+     * Set provision type with normalization to lowercase
+     * FIXED: Normalizes to lowercase for consistent matching
+     */
     public void setProvisionType(String provisionType) {
         if (provisionType != null) {
             String lowerType = provisionType.toLowerCase();
             if (!"permit".equals(lowerType) && !"deny".equals(lowerType)) {
-                throw new IllegalArgumentException("Provision type must be 'permit' or 'deny', got: " + provisionType);
+                throw new IllegalArgumentException(
+                        "Provision type must be 'permit' or 'deny', got: " + provisionType
+                );
             }
             this.provisionType = lowerType;
         } else {
