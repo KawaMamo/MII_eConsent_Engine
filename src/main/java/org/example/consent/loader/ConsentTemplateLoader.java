@@ -3,13 +3,14 @@ package org.example.consent.loader;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
-import org.example.consent.model.ExchangeFormatDefinition;
 import org.example.consent.model.ConsentTemplate;
+import org.example.consent.model.ExchangeFormatDefinition;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Files;
 
 public class ConsentTemplateLoader {
@@ -24,8 +25,9 @@ public class ConsentTemplateLoader {
         this.objectMapper.enable(SerializationFeature.INDENT_OUTPUT);
     }
 
+    // File-based loading
     public ExchangeFormatDefinition loadFromFile(String filePath) throws IOException {
-        logger.info("Loading consent template from: {}", filePath);
+        logger.info("Loading consent template from file: {}", filePath);
         File file = new File(filePath);
         return loadFromFile(file);
     }
@@ -34,15 +36,26 @@ public class ConsentTemplateLoader {
         if (!file.exists()) {
             throw new IOException("File not found: " + file.getAbsolutePath());
         }
-
         String json = new String(Files.readAllBytes(file.toPath()));
-        return loadFromJson(json);
+        return parseAndProcess(json);
     }
 
-    public ExchangeFormatDefinition loadFromJson(String json) throws IOException {
+    // Classpath-based loading (for tests)
+    public ExchangeFormatDefinition loadFromClasspath(String resourcePath) throws IOException {
+        logger.info("Loading consent template from classpath: {}", resourcePath);
+        try (InputStream stream = getClass().getClassLoader().getResourceAsStream(resourcePath)) {
+            if (stream == null) {
+                throw new IOException("Resource not found on classpath: " + resourcePath);
+            }
+            String json = new String(stream.readAllBytes());
+            return parseAndProcess(json);
+        }
+    }
+
+    private ExchangeFormatDefinition parseAndProcess(String json) throws IOException {
         ExchangeFormatDefinition template = objectMapper.readValue(json, ExchangeFormatDefinition.class);
 
-        // FIXED: Propagate domain externProperties to each template
+        // Propagate domain externProperties to each template
         if (template.getDomain() != null && template.getTemplatesConsentTemplate() != null) {
             String domainExternProperties = template.getDomain().getExternProperties();
             if (domainExternProperties != null && !domainExternProperties.isEmpty()) {
